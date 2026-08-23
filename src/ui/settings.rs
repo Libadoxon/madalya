@@ -2,12 +2,16 @@ use std::path::PathBuf;
 
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, ThemeRegistry,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
     popover::Popover,
-    setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
+    select::{SearchableVec, Select, SelectEvent, SelectState},
+    setting::{
+        NumberFieldOptions, RenderOptions, SettingField, SettingGroup, SettingItem, SettingPage,
+        Settings,
+    },
     v_flex,
 };
 use strum::IntoEnumIterator;
@@ -86,18 +90,20 @@ pub fn render_settings(_app: &AppView, cx: &mut Context<AppView>) -> impl IntoEl
         )
         .page(
             SettingPage::new("General").group(
-                SettingGroup::new().item(
-                    bool_item(
-                        "Write log file",
-                        readonly,
-                        |c| c.general.log_to_file,
-                        |c, v| c.general.log_to_file = v,
-                    )
-                    .description(
-                        "Tee stderr logs into a per-launch file under the user state dir. \
-                         Takes effect on next launch.",
+                SettingGroup::new()
+                    .item(theme_item(readonly))
+                    .item(
+                        bool_item(
+                            "Write log file",
+                            readonly,
+                            |c| c.general.log_to_file,
+                            |c, v| c.general.log_to_file = v,
+                        )
+                        .description(
+                            "Tee stderr logs into a per-launch file under the user state dir. \
+                             Takes effect on next launch.",
+                        ),
                     ),
-                ),
             ),
         )
         .page(
@@ -572,6 +578,59 @@ fn render_script_editor(
                     let _ = app.update(cx, |a, cx| a.rescan_library(cx));
                 }),
         )
+}
+
+struct ThemeSelectState {
+    select: Entity<SelectState<SearchableVec<SharedString>>>,
+    _sub: Subscription,
+}
+
+fn theme_item(readonly: bool) -> SettingItem {
+    SettingItem::new(
+        "Theme",
+        SettingField::element(
+            move |_opts: &RenderOptions, window: &mut Window, cx: &mut App| {
+                render_theme_select(readonly, window, cx)
+            },
+        ),
+    )
+    .disabled(readonly)
+}
+
+fn render_theme_select(readonly: bool, window: &mut Window, cx: &mut App) -> AnyElement {
+    let names: Vec<SharedString> = ThemeRegistry::global(cx)
+        .sorted_themes()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    let current = SharedString::from(cx.global::<Config>().appearance.theme.clone());
+    let selected = names.iter().position(|n| n == &current).map(IndexPath::new);
+
+    let state =
+        window.use_keyed_state(SharedString::from("theme-select"), cx, move |window, cx| {
+            let select = cx.new(|cx| {
+                SelectState::new(SearchableVec::new(names), selected, window, cx).searchable(true)
+            });
+            let sub = cx.subscribe(
+                &select,
+                |_this, _select, ev: &SelectEvent<SearchableVec<SharedString>>, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = ev {
+                        let value = value.to_string();
+                        config::update(cx, |c| c.appearance.theme = value.clone());
+                    }
+                },
+            );
+            ThemeSelectState { select, _sub: sub }
+        });
+
+    let select = state.read(cx).select.clone();
+    Select::new(&select)
+        .small()
+        .menu_width(px(240.))
+        .menu_max_h(px(360.))
+        .search_placeholder("Search themes…")
+        .disabled(readonly)
+        .into_any_element()
 }
 
 fn get_clips_dir(c: &Config) -> String {

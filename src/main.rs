@@ -59,7 +59,7 @@ fn main() {
             Err(e) => tracing::warn!("failed to create default script: {e:#}"),
         }
 
-        assets::init_themes("Gruvbox Light", cx);
+        assets::init_themes(cx);
 
         let store = match library::open_store() {
             Ok(s) => s,

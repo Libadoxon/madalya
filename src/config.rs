@@ -15,8 +15,23 @@ use crate::meta::APP_ID;
 #[serde(default)]
 pub struct Config {
     pub general: General,
+    pub appearance: Appearance,
     pub library: Library,
     pub keybinds: Keybinds,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub theme: String,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: "Default Dark".into(),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
