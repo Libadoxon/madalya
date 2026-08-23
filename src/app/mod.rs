@@ -1,22 +1,44 @@
 mod keybinds;
 
+use std::path::PathBuf;
+
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{ActiveTheme as _, WindowExt as _, button::*, *};
+use gpui_component::{ActiveTheme as _, button::*, *};
 
 use crate::config::Config;
 use crate::keybinds::{Action, KeyBind, is_cancel_gesture, is_unbind_gesture};
-use crate::meta::{APP_DESCRIPTION, APP_DISPLAY_NAME};
+use crate::library::Library;
+use crate::media::player::{Player, PlayerOptions};
+use crate::ui::fullscreen::Fullscreen;
+use crate::ui::grid::render_grid;
 use crate::ui::settings::render_settings;
 
-/// Root view of the app. This template keeps only the framework scaffolding:
-/// global keybind dispatch, an in-progress keybind recording, and a settings
-/// pane toggle. Build your real UI in `render` and add behavior in `dispatch`.
+const PREVIEW_WIDTH: u32 = 480;
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mode {
+    Grid,
+    Fullscreen,
+}
+
+pub(crate) struct PreviewState {
+    pub path: PathBuf,
+    pub player: Entity<Player>,
+}
+
+type LibCfgKey = (Option<PathBuf>, Option<PathBuf>);
+
 pub struct AppView {
     pub(crate) settings_open: bool,
     pub(crate) recording: Option<KeybindRecording>,
-    /// Focus target that receives the window's global key/mouse events so
-    /// keybinds dispatch regardless of what's focused inside the app.
     pub(crate) root_focus: FocusHandle,
+    pub(crate) library: Entity<Library>,
+    pub(crate) mode: Mode,
+    pub(crate) selected: usize,
+    pub(crate) fullscreen: Option<Entity<Fullscreen>>,
+    pub(crate) preview: Option<PreviewState>,
+    last_lib_cfg: LibCfgKey,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -32,19 +54,38 @@ pub(crate) struct KeybindRecording {
 }
 
 impl AppView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(library: Entity<Library>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let root_focus = cx.focus_handle();
         root_focus.focus(window, cx);
 
-        // Re-render whenever the config changes — settings edits and external
-        // file-watcher reloads both publish a new `Config` global.
-        let config_sub = cx.observe_global::<Config>(|_this, cx| cx.notify());
+        let config_sub = cx.observe_global::<Config>(|this, cx| {
+            this.on_config_changed(cx);
+            cx.notify();
+        });
+        let lib_sub = cx.observe(&library, |_this, _lib, cx| cx.notify());
+
+        let last_lib_cfg = lib_cfg_key(cx);
+        library.update(cx, |l, cx| l.rescan(cx));
 
         Self {
             settings_open: false,
             recording: None,
             root_focus,
-            _subscriptions: vec![config_sub],
+            library,
+            mode: Mode::Grid,
+            selected: 0,
+            fullscreen: None,
+            preview: None,
+            last_lib_cfg,
+            _subscriptions: vec![config_sub, lib_sub],
+        }
+    }
+
+    fn on_config_changed(&mut self, cx: &mut Context<Self>) {
+        let key = lib_cfg_key(cx);
+        if key != self.last_lib_cfg {
+            self.last_lib_cfg = key;
+            self.library.update(cx, |l, cx| l.rescan(cx));
         }
     }
 
@@ -126,17 +167,25 @@ impl AppView {
         }
     }
 
-    /// Turn a matched `Action` into behavior. Add an arm here for every
-    /// variant you add to `keybinds::Action`.
-    fn dispatch(&mut self, action: Action, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn dispatch(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             Action::ToggleSettings => self.toggle_settings(cx),
             Action::Close => cx.quit(),
-            Action::RunCommand(cmd) => {
-                // Demo payload action. The command string is editable inline in
-                // the keybind settings row — swap this for real behavior.
-                tracing::info!("run command: {cmd}");
+            Action::OpenSelected => self.open_fullscreen(self.selected, window, cx),
+            Action::ExitFullscreen => self.exit_fullscreen(window, cx),
+            Action::NextClip => self.navigate(1, window, cx),
+            Action::PrevClip => self.navigate(-1, window, cx),
+            Action::PlayPause => {
+                if let Some(fs) = &self.fullscreen {
+                    fs.update(cx, |f, cx| f.toggle_play(cx));
+                }
             }
+            Action::ToggleMute => {
+                if let Some(fs) = &self.fullscreen {
+                    fs.update(cx, |f, cx| f.toggle_mute(cx));
+                }
+            }
+            Action::ToggleFavorite => self.toggle_favorite(cx),
         }
     }
 
@@ -144,10 +193,111 @@ impl AppView {
         self.settings_open = !self.settings_open;
         cx.notify();
     }
+
+    pub(crate) fn clip_count(&self, cx: &App) -> usize {
+        self.library.read(cx).clips().len()
+    }
+
+    pub(crate) fn select(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.selected = idx;
+        cx.notify();
+    }
+
+    fn navigate(&mut self, delta: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.clip_count(cx);
+        if count == 0 {
+            return;
+        }
+        let next = (self.selected as i64 + delta).rem_euclid(count as i64) as usize;
+        self.selected = next;
+        if self.mode == Mode::Fullscreen {
+            self.stop_preview(window, cx);
+            let clip = self.library.read(cx).clip(next).cloned();
+            if let (Some(fs), Some(clip)) = (&self.fullscreen, clip) {
+                fs.update(cx, |f, cx| f.load(clip, window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn open_fullscreen(
+        &mut self,
+        idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clip) = self.library.read(cx).clip(idx).cloned() else {
+            return;
+        };
+        self.selected = idx;
+        self.stop_preview(window, cx);
+        let library = self.library.clone();
+        let app = cx.weak_entity();
+        let fs = cx.new(|cx| Fullscreen::new(library, app, clip, window, cx));
+        self.fullscreen = Some(fs);
+        self.mode = Mode::Fullscreen;
+        self.root_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn exit_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != Mode::Fullscreen {
+            return;
+        }
+        self.fullscreen = None;
+        self.mode = Mode::Grid;
+        self.root_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn toggle_favorite(&mut self, cx: &mut Context<Self>) {
+        let idx = self.selected;
+        let Some(clip) = self.library.read(cx).clip(idx).cloned() else {
+            return;
+        };
+        self.library
+            .update(cx, |l, cx| l.set_favorite(&clip.path, !clip.favorite, cx));
+    }
+
+    pub(crate) fn start_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.preview.as_ref().is_some_and(|p| p.path == path) {
+            return;
+        }
+        let Ok(uri) = crate::media::path_to_uri(&path) else {
+            return;
+        };
+        let opts = PlayerOptions {
+            muted: true,
+            looping: true,
+            preview_width: Some(PREVIEW_WIDTH),
+        };
+        let player = cx.new(|cx| Player::new(&uri, opts, Vec::new(), cx));
+        self.preview = Some(PreviewState { path, player });
+        cx.notify();
+    }
+
+    pub(crate) fn stop_preview(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn preview_for(&self, path: &std::path::Path) -> Option<Entity<Player>> {
+        self.preview
+            .as_ref()
+            .filter(|p| p.path == path)
+            .map(|p| p.player.clone())
+    }
+}
+
+fn lib_cfg_key(cx: &App) -> LibCfgKey {
+    let lib = &cx.global::<Config>().library;
+    (lib.clips_dir.clone(), lib.script_path.clone())
 }
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let fullscreen_mode = self.mode == Mode::Fullscreen && !self.settings_open;
         let top_bar = h_flex()
             .w_full()
             .px_3()
@@ -156,7 +306,23 @@ impl Render for AppView {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(div().font_semibold().child(APP_DISPLAY_NAME))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .when(fullscreen_mode, |el| {
+                        el.child(
+                            Button::new("back-to-grid")
+                                .ghost()
+                                .icon(IconName::ArrowLeft)
+                                .tooltip("Back to grid")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.dispatch(Action::ExitFullscreen, window, cx)
+                                })),
+                        )
+                    })
+                    .child(div().font_semibold().child(crate::meta::APP_DISPLAY_NAME)),
+            )
             .child(
                 Button::new("toggle-settings")
                     .ghost()
@@ -167,24 +333,13 @@ impl Render for AppView {
 
         let body: AnyElement = if self.settings_open {
             render_settings(self, cx).into_any_element()
+        } else if fullscreen_mode {
+            match &self.fullscreen {
+                Some(fs) => fs.clone().into_any_element(),
+                None => div().into_any_element(),
+            }
         } else {
-            v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(div().text_lg().child(APP_DISPLAY_NAME))
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(APP_DESCRIPTION),
-                )
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Press Ctrl+, or the gear to open settings."),
-                )
-                .into_any_element()
+            render_grid(self, window, cx).into_any_element()
         };
 
         // Root holds dialogs/notifications in its own state, but the app's root

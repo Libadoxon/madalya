@@ -23,3 +23,16 @@ strum = { version = "0.28.0", features = ["derive"] }
 toml = "1.1.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-audio = "0.25"
+gstreamer-video = "0.25"
+gstreamer-pbutils = "0.25"
+rusqlite = { version = "0.37", features = ["bundled"] }
+rhai = { version = "1", features = ["sync"] }
+ureq = "2"
+serde_json = "1"
+# Match gpui's image version so `image::Frame` unifies with `RenderImage`.
+image = "0.25"
+smallvec = "1"
+walkdir = "2"

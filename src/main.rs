@@ -8,8 +8,11 @@ mod app;
 mod assets;
 mod config;
 mod keybinds;
+mod library;
 mod logging;
+mod media;
 mod meta;
+mod script;
 mod ui;
 
 fn main() {
@@ -18,6 +21,10 @@ fn main() {
     app.run(move |cx| {
         // This must be called before using any GPUI Component features.
         gpui_component::init(cx);
+
+        if let Err(e) = media::init() {
+            tracing::error!("failed to init gstreamer: {e:#}");
+        }
 
         // Load or create config (with parent dirs), publish as a Global, and
         // start watching the file for external edits.
@@ -43,17 +50,26 @@ fn main() {
 
         assets::init_themes("Gruvbox Light", cx);
 
-        let bounds = Bounds::centered(None, size(px(675.), px(430.)), cx);
+        let store = match library::open_store() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("failed to open library store: {e:#}");
+                return;
+            }
+        };
+        let lib = library::new_library(store, cx);
+
+        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(600.), px(400.))),
+            window_min_size: Some(size(px(720.), px(480.))),
             app_id: Some(meta::APP_ID.into()),
             ..Default::default()
         };
 
         cx.spawn(async move |cx| {
             cx.open_window(options, |window, cx| {
-                let view = cx.new(|cx| AppView::new(window, cx));
+                let view = cx.new(|cx| AppView::new(lib.clone(), window, cx));
                 // This first level on the window, should be a Root.
                 cx.new(|cx| Root::new(view, window, cx))
             })

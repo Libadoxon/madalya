@@ -24,11 +24,20 @@ pub enum Action {
     ToggleSettings,
     #[strum(message = "Close")]
     Close,
-    /// Payload-carrying action: the string renders as an inline, editable
-    /// field in the keybind settings row. Demonstrates how a bound action can
-    /// carry configuration alongside its trigger.
-    #[strum(message = "Run Command")]
-    RunCommand(String),
+    #[strum(message = "Open Clip")]
+    OpenSelected,
+    #[strum(message = "Exit Fullscreen")]
+    ExitFullscreen,
+    #[strum(message = "Next Clip")]
+    NextClip,
+    #[strum(message = "Previous Clip")]
+    PrevClip,
+    #[strum(message = "Play / Pause")]
+    PlayPause,
+    #[strum(message = "Toggle Mute")]
+    ToggleMute,
+    #[strum(message = "Toggle Favorite")]
+    ToggleFavorite,
 }
 
 impl Action {
@@ -324,37 +333,54 @@ pub struct Keybinds {
 
 impl Default for Keybinds {
     fn default() -> Self {
+        let key = |k: &str| KeyBind {
+            modifiers: BindModifiers::default(),
+            trigger: Trigger::Key(k.into()),
+        };
+        let ctrl = |k: &str| KeyBind {
+            modifiers: BindModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+            trigger: Trigger::Key(k.into()),
+        };
         Self {
             bindings: vec![
                 Binding {
                     action: Action::ToggleSettings,
-                    bind: KeyBind {
-                        modifiers: BindModifiers {
-                            ctrl: true,
-                            ..Default::default()
-                        },
-                        trigger: Trigger::Key(",".into()),
-                    },
+                    bind: ctrl(","),
                 },
                 Binding {
                     action: Action::Close,
-                    bind: KeyBind {
-                        modifiers: BindModifiers {
-                            ctrl: true,
-                            ..Default::default()
-                        },
-                        trigger: Trigger::Key("q".into()),
-                    },
+                    bind: ctrl("q"),
                 },
                 Binding {
-                    action: Action::RunCommand("echo hello".into()),
-                    bind: KeyBind {
-                        modifiers: BindModifiers {
-                            ctrl: true,
-                            ..Default::default()
-                        },
-                        trigger: Trigger::Key("r".into()),
-                    },
+                    action: Action::OpenSelected,
+                    bind: key("enter"),
+                },
+                Binding {
+                    action: Action::ExitFullscreen,
+                    bind: key("escape"),
+                },
+                Binding {
+                    action: Action::NextClip,
+                    bind: key("right"),
+                },
+                Binding {
+                    action: Action::PrevClip,
+                    bind: key("left"),
+                },
+                Binding {
+                    action: Action::PlayPause,
+                    bind: key("space"),
+                },
+                Binding {
+                    action: Action::ToggleMute,
+                    bind: key("m"),
+                },
+                Binding {
+                    action: Action::ToggleFavorite,
+                    bind: key("f"),
                 },
             ],
         }

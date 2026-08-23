@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::path::PathBuf;
 
 use gpui::*;
 use gpui_component::{
@@ -10,7 +10,7 @@ use gpui_component::{
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     v_flex,
 };
-use strum::{EnumMessage, IntoEnumIterator};
+use strum::IntoEnumIterator;
 
 use crate::app::AppView;
 use crate::config::{self, Config, ConfigStatus};
@@ -26,49 +26,59 @@ pub fn render_settings(_app: &AppView, cx: &mut Context<AppView>) -> impl IntoEl
     Settings::new("settings")
         .sidebar_width(px(135.))
         .page(
-            SettingPage::new("General").default_open(true).group(
+            SettingPage::new("Library").default_open(true).group(
                 SettingGroup::new()
+                    .item(
+                        input_item(
+                            "Clips directory",
+                            readonly,
+                            get_clips_dir,
+                            set_clips_dir,
+                        )
+                        .description("Folder scanned recursively for video clips."),
+                    )
+                    .item(
+                        input_item(
+                            "Metadata script",
+                            readonly,
+                            get_script_path,
+                            set_script_path,
+                        )
+                        .description("Optional Rhai script that derives per-clip metadata and tags."),
+                    )
                     .item(bool_item(
-                        "Example toggle",
+                        "Preview on hover",
                         readonly,
-                        |c| c.general.example_toggle,
-                        |c, v| c.general.example_toggle = v,
-                    ))
-                    .item(dropdown_item(
-                        "Example choice",
-                        readonly,
-                        |c| c.general.example_choice,
-                        |c, v| c.general.example_choice = v,
+                        |c| c.library.preview_on_hover,
+                        |c, v| c.library.preview_on_hover = v,
                     ))
                     .item(number_item(
-                        "Example number",
+                        "Thumbnail width (px)",
                         readonly,
                         NumberFieldOptions {
-                            min: 0.0,
+                            min: 80.0,
                             max: 1_000.0,
-                            step: 1.0,
+                            step: 20.0,
                         },
-                        |c| c.general.example_number as f64,
-                        |c, v| c.general.example_number = v.max(0.0) as u32,
-                    ))
-                    .item(input_item(
-                        "Example text",
+                        |c| c.library.thumb_px as f64,
+                        |c, v| c.library.thumb_px = v.clamp(80.0, 1_000.0) as u32,
+                    )),
+            ),
+        )
+        .page(
+            SettingPage::new("General").group(
+                SettingGroup::new().item(
+                    bool_item(
+                        "Write log file",
                         readonly,
-                        |c| c.general.example_text.clone(),
-                        |c, v| c.general.example_text = v,
-                    ))
-                    .item(
-                        bool_item(
-                            "Write log file",
-                            readonly,
-                            |c| c.general.log_to_file,
-                            |c, v| c.general.log_to_file = v,
-                        )
-                        .description(
-                            "Tee stderr logs into a per-launch file under the user state dir. \
-                             Takes effect on next launch.",
-                        ),
+                        |c| c.general.log_to_file,
+                        |c, v| c.general.log_to_file = v,
+                    )
+                    .description(
+                        "Tee stderr logs into a per-launch file under the user state dir. \
+                         Takes effect on next launch.",
                     ),
+                ),
             ),
         )
         .page(
@@ -97,11 +107,6 @@ fn keybind_row_item(idx: usize, app: WeakEntity<AppView>, readonly: bool, cx: &A
             keywords.push(binding.bind.to_string().into());
             keywords.push(binding.bind.to_string().replace(" ", "").into());
         }
-        if let Action::RunCommand(cmd) = &binding.action
-            && !cmd.is_empty()
-        {
-            keywords.push(cmd.clone().into());
-        }
     }
 
     SettingItem::render(move |_opts, window, cx: &mut App| {
@@ -109,14 +114,6 @@ fn keybind_row_item(idx: usize, app: WeakEntity<AppView>, readonly: bool, cx: &A
     })
     .keywords(keywords)
     .disabled(readonly)
-}
-
-/// Owns the inline payload-input state for a `RunCommand` binding row. The
-/// subscription handle keeps `cx.subscribe` alive for the lifetime of the
-/// state entity; dropped when the row stops rendering.
-struct PayloadInputState {
-    input: Entity<InputState>,
-    _subscription: Subscription,
 }
 
 /// Owns the search-input state for a binding row's action picker plus the
@@ -167,67 +164,6 @@ fn render_keybind_row(
         cx,
     );
 
-    // Payload-carrying actions render an extra inline field. `RunCommand` is
-    // the template's example: editing this field rewrites the bound action's
-    // payload. Add branches here for your own payload variants.
-    let payload_input_widget: Option<AnyElement> = if let Action::RunCommand(cmd) = &binding.action
-    {
-        let initial: SharedString = cmd.clone().into();
-        let app_for_input = app.clone();
-        let state = window.use_keyed_state(
-            SharedString::from(format!("kb-payload-{idx}")),
-            cx,
-            |window, cx| {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .default_value(initial.clone())
-                        .placeholder("command to run")
-                });
-                let sub = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                        let value = input.read(cx).value().to_string();
-                        _ = app_for_input.update(cx, |this, ctx| {
-                            // Guard against races where the row has been
-                            // switched away from RunCommand since this input
-                            // was created.
-                            let still_cmd = ctx
-                                .global::<Config>()
-                                .keybinds
-                                .bindings
-                                .get(idx)
-                                .is_some_and(|b| matches!(b.action, Action::RunCommand(_)));
-                            if still_cmd {
-                                this.set_binding_action(idx, Action::RunCommand(value), ctx);
-                            }
-                        });
-                    }
-                });
-                PayloadInputState {
-                    input,
-                    _subscription: sub,
-                }
-            },
-        );
-        // Sync the input when the config changed externally (file watcher,
-        // config reset). Skip while focused so we don't yank text from
-        // under the user mid-edit.
-        let input_entity = state.read(cx).input.clone();
-        let current = input_entity.read(cx).value().to_string();
-        let target = cmd.clone();
-        let focused = input_entity.read(cx).focus_handle(cx).is_focused(window);
-        if current != target && !focused {
-            input_entity.update(cx, |s, cx| s.set_value(target, window, cx));
-        }
-        Some(
-            Input::new(&input_entity)
-                .small()
-                .disabled(readonly)
-                .into_any_element(),
-        )
-    } else {
-        None
-    };
-
     let bind_widget: AnyElement = if let Some(focus) = recording_here {
         div()
             .id(recorder_id)
@@ -269,15 +205,12 @@ fn render_keybind_row(
             });
         });
 
-    let mut row = h_flex()
+    h_flex()
         .w_full()
         .gap_2()
         .items_center()
-        .child(action_picker);
-    if let Some(w) = payload_input_widget {
-        row = row.child(w);
-    }
-    row.child(bind_widget)
+        .child(action_picker)
+        .child(bind_widget)
         .child(div().flex_1())
         .child(delete_btn)
         .into_any_element()
@@ -554,39 +487,26 @@ fn number_item(
     .disabled(disabled)
 }
 
-/// Render a dropdown bound to a config enum. Variant identifiers serve as keys
-/// (matching their serde representation in the TOML file) and `#[strum(message
-/// = ...)]` provides the human-readable label.
-fn dropdown_item<T>(
-    label: &'static str,
-    disabled: bool,
-    get: fn(&Config) -> T,
-    set: fn(&mut Config, T),
-) -> SettingItem
-where
-    T: 'static + Copy + IntoEnumIterator + Into<&'static str> + FromStr + EnumMessage,
-{
-    let options: Vec<(SharedString, SharedString)> = T::iter()
-        .map(|v| {
-            let key: &'static str = v.into();
-            let label = v.get_message().unwrap_or(key);
-            (SharedString::from(key), SharedString::from(label))
-        })
-        .collect();
-    SettingItem::new(
-        label,
-        SettingField::dropdown(
-            options,
-            move |cx: &App| {
-                let key: &'static str = get(cx.global::<Config>()).into();
-                SharedString::from(key)
-            },
-            move |val: SharedString, cx: &mut App| {
-                if let Ok(v) = T::from_str(val.as_ref()) {
-                    config::update(cx, |c| set(c, v));
-                }
-            },
-        ),
-    )
-    .disabled(disabled)
+fn get_clips_dir(c: &Config) -> String {
+    c.library
+        .clips_dir
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+fn set_clips_dir(c: &mut Config, v: String) {
+    c.library.clips_dir = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
+}
+
+fn get_script_path(c: &Config) -> String {
+    c.library
+        .script_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+fn set_script_path(c: &mut Config, v: String) {
+    c.library.script_path = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
 }

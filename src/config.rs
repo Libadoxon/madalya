@@ -5,7 +5,6 @@ use anyhow::Context as _;
 use gpui::{App, Global};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use strum::{EnumIter, EnumMessage, EnumString, IntoStaticStr};
 
 use crate::keybinds::Keybinds;
 use crate::meta::APP_ID;
@@ -16,58 +15,34 @@ use crate::meta::APP_ID;
 #[serde(default)]
 pub struct Config {
     pub general: General,
+    pub library: Library,
     pub keybinds: Keybinds,
 }
 
-/// Demo settings section. Each field shows a different `SettingField` widget in
-/// `ui/settings.rs`: a switch, a dropdown, a number input, and a text input.
-/// Replace these with your own; `log_to_file` is the one field the framework
-/// actually reads (see `logging::init`).
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct General {
-    pub example_toggle: bool,
-    pub example_choice: ExampleChoice,
-    pub example_number: u32,
-    pub example_text: String,
-    pub log_to_file: bool,
+pub struct Library {
+    pub clips_dir: Option<PathBuf>,
+    pub script_path: Option<PathBuf>,
+    pub preview_on_hover: bool,
+    pub thumb_px: u32,
 }
 
-impl Default for General {
+impl Default for Library {
     fn default() -> Self {
         Self {
-            example_toggle: true,
-            example_choice: ExampleChoice::default(),
-            example_number: 42,
-            example_text: "hello".into(),
-            log_to_file: false,
+            clips_dir: None,
+            script_path: None,
+            preview_on_hover: true,
+            thumb_px: 320,
         }
     }
 }
 
-/// Example enum-backed setting rendered as a dropdown. Copy this pattern for
-/// any multiple-choice value: the variant identifier is the key stored in TOML
-/// and `#[strum(message = ...)]` supplies the human-readable label.
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    Default,
-    EnumIter,
-    EnumString,
-    IntoStaticStr,
-    EnumMessage,
-)]
-pub enum ExampleChoice {
-    #[default]
-    #[strum(message = "First option")]
-    First,
-    #[strum(message = "Second option")]
-    Second,
-    #[strum(message = "Third option")]
-    Third,
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct General {
+    pub log_to_file: bool,
 }
 
 impl Global for Config {}
