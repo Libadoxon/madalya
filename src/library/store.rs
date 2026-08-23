@@ -349,15 +349,26 @@ mod tests {
                 height: 720,
                 vcodec: "H.264".into(),
                 tracks: vec![
-                    AudioTrack { idx: 0, label: "Game".into(), language: None },
-                    AudioTrack { idx: 1, label: "Track 2".into(), language: None },
+                    AudioTrack {
+                        idx: 0,
+                        label: "Game".into(),
+                        language: None,
+                    },
+                    AudioTrack {
+                        idx: 1,
+                        label: "Track 2".into(),
+                        language: None,
+                    },
                 ],
                 container_tags: vec![],
             },
             favorite: false,
             thumb_path: Some(PathBuf::from("/thumbs/a.jpg")),
             tags: vec!["clip".into()],
-            meta: vec![("title".into(), "A".into()), ("game".into(), "Dota 2".into())],
+            meta: vec![
+                ("title".into(), "A".into()),
+                ("game".into(), "Dota 2".into()),
+            ],
             track_state: vec![],
             added_at: 1,
         }
@@ -388,7 +399,15 @@ mod tests {
         // User edits.
         s.set_favorite(&path, true).unwrap();
         s.add_tag(&path, "funny").unwrap();
-        s.set_track_state(&path, TrackState { idx: 1, volume: 0.4, muted: true }).unwrap();
+        s.set_track_state(
+            &path,
+            TrackState {
+                idx: 1,
+                volume: 0.4,
+                muted: true,
+            },
+        )
+        .unwrap();
 
         // Re-scan produces new script-derived meta/tags.
         let mut changed = sample();
@@ -400,8 +419,14 @@ mod tests {
         let c = &s.load_all().unwrap()[0];
         assert!(c.favorite, "favorite preserved across rescan");
         assert!(c.tags.contains(&"funny".to_string()), "user tag preserved");
-        assert!(c.tags.contains(&"clip2".to_string()), "new script tag applied");
-        assert!(!c.tags.contains(&"clip".to_string()), "old script tag replaced");
+        assert!(
+            c.tags.contains(&"clip2".to_string()),
+            "new script tag applied"
+        );
+        assert!(
+            !c.tags.contains(&"clip".to_string()),
+            "old script tag replaced"
+        );
         assert_eq!(c.title(), "A2", "script meta replaced");
         let st = c.state_for(1);
         assert_eq!(st.volume, 0.4);

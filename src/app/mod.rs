@@ -194,6 +194,10 @@ impl AppView {
         cx.notify();
     }
 
+    pub(crate) fn rescan_library(&mut self, cx: &mut Context<Self>) {
+        self.library.update(cx, |l, cx| l.rescan(cx));
+    }
+
     pub(crate) fn clip_count(&self, cx: &App) -> usize {
         self.library.read(cx).clips().len()
     }

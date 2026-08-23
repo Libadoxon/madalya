@@ -91,6 +91,7 @@ impl Player {
                     smol::Timer::after(Duration::from_millis(250)).await;
                     if this
                         .update(cx, |p, cx| {
+                            p.drain_bus();
                             p.refresh_position();
                             cx.notify();
                         })
@@ -185,6 +186,27 @@ impl Player {
         false
     }
 
+    fn drain_bus(&self) {
+        let Some(bus) = self.pipeline.as_ref().and_then(|p| p.bus()) else {
+            return;
+        };
+        while let Some(msg) = bus.pop() {
+            use gst::MessageView;
+            match msg.view() {
+                MessageView::Error(e) => tracing::error!(
+                    "pipeline error from {:?}: {} ({:?})",
+                    e.src().map(|s| s.path_string()),
+                    e.error(),
+                    e.debug()
+                ),
+                MessageView::Warning(w) => {
+                    tracing::warn!("pipeline warning: {} ({:?})", w.error(), w.debug())
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn refresh_position(&mut self) {
         let Some(p) = &self.pipeline else { return };
         if let Some(pos) = p.query_position::<gst::ClockTime>() {
@@ -267,6 +289,9 @@ fn build_pipeline(
         let conv = gst::ElementFactory::make("audioconvert").build()?;
         let resample = gst::ElementFactory::make("audioresample").build()?;
         let sink = gst::ElementFactory::make("autoaudiosink").build()?;
+        // Don't let the audio sink's preroll gate the pipeline: video must play
+        // even when no audio device is available.
+        sink.set_property("async-handling", true);
         pipeline.add_many([&mixer, &conv, &resample, &sink])?;
         gst::Element::link_many([&mixer, &conv, &resample, &sink])?;
         Some(mixer)
@@ -277,8 +302,11 @@ fn build_pipeline(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                if let Some((w, h, data)) = sample_to_bgra(&sample) {
-                    let _ = tx_frame.try_send(PlayerMsg::Frame(w, h, data));
+                match sample_to_bgra(&sample) {
+                    Some((w, h, data)) => {
+                        let _ = tx_frame.try_send(PlayerMsg::Frame(w, h, data));
+                    }
+                    None => tracing::warn!("sample_to_bgra returned None"),
                 }
                 Ok(gst::FlowSuccess::Ok)
             })
@@ -298,13 +326,16 @@ fn build_pipeline(
         let Some(pipeline) = pipeline_weak.upgrade() else {
             return;
         };
-        let name = pad
-            .current_caps()
-            .and_then(|c| c.structure(0).map(|s| s.name().to_string()))
+        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+        let name = caps
+            .structure(0)
+            .map(|s| s.name().as_str().to_string())
             .unwrap_or_default();
 
         if name.starts_with("video/") {
-            let _ = pad.link(&vc_sink);
+            if let Err(e) = pad.link(&vc_sink) {
+                tracing::error!("failed to link video pad: {e:?}");
+            }
             return;
         }
         if !name.starts_with("audio/") {
@@ -360,4 +391,54 @@ fn build_pipeline(
     });
 
     Ok(pipeline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_produces_frames() {
+        let clip = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join("clips-test/random_capture.mp4");
+        if !clip.exists() {
+            eprintln!("skipping: no test clip at {clip:?}");
+            return;
+        }
+        crate::media::init().unwrap();
+        let uri = crate::media::path_to_uri(&clip).unwrap();
+        let (tx, rx) = smol::channel::bounded::<PlayerMsg>(4);
+        let vols = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = build_pipeline(
+            &uri,
+            PlayerOptions {
+                muted: true,
+                looping: false,
+                preview_width: None,
+            },
+            Vec::new(),
+            vols,
+            tx,
+        )
+        .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let got = smol::block_on(async {
+            let recv = async { rx.recv().await.ok() };
+            let timeout = async {
+                smol::Timer::after(Duration::from_secs(10)).await;
+                None
+            };
+            smol::future::or(recv, timeout).await
+        });
+        let _ = pipeline.set_state(gst::State::Null);
+
+        match got {
+            Some(PlayerMsg::Frame(w, h, data)) => {
+                assert!(w > 0 && h > 0);
+                assert_eq!(data.len(), (w * h * 4) as usize);
+            }
+            other => panic!("expected a frame, got {:?}", other.is_some()),
+        }
+    }
 }

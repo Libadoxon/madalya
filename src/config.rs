@@ -67,6 +67,50 @@ pub fn is_readonly(path: &Path) -> bool {
     std::fs::OpenOptions::new().write(true).open(path).is_err()
 }
 
+/// Default metadata-script location: `$XDG_CONFIG_HOME/<APP_ID>/metadata.rhai`.
+pub fn default_script_path() -> PathBuf {
+    dirs::config_dir()
+        .expect("no config dir")
+        .join(APP_ID)
+        .join("metadata.rhai")
+}
+
+const SCRIPT_TEMPLATE: &str = r#"// Metadata script. Returns a map of fields derived from each clip.
+// Available: clip.path, clip.filename, clip.stem, clip.ext, clip.dir,
+// clip.size, clip.mtime, clip.duration_ms, clip.width, clip.height,
+// clip.vcodec, clip.audio_tracks (array), clip.container_tags (map).
+// `title` and `game` are shown in the UI; `tags` (array) become clip tags.
+// steam_app_name(id) resolves a numeric Steam app id to a game title.
+
+let m = #{};
+m.title = clip.stem;
+m.tags = ["clip"];
+
+// Example: filenames like "steam_app_570 - clutch" -> resolve the game.
+let head = clip.stem.split(" - ")[0];
+let segs = head.split("_");
+let last = segs[segs.len() - 1];
+try {
+    let id = parse_int(last);
+    let game = steam_app_name(id);
+    if game != "" { m.game = game; }
+} catch(e) {}
+
+m
+"#;
+
+/// Create the default script file with a starter template if it doesn't exist.
+pub fn ensure_script_file() -> anyhow::Result<PathBuf> {
+    let path = default_script_path();
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, SCRIPT_TEMPLATE)?;
+    }
+    Ok(path)
+}
+
 /// Apply `mutate` to a fresh clone of the global config and persist if it
 /// actually changed. Saves us from forgetting to call `cx.set_global` or
 /// hit disk after each tweak.

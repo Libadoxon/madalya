@@ -48,6 +48,17 @@ fn main() {
         cx.set_global(config::ConfigStatus { readonly });
         config::watch(config_path, cx);
 
+        // Ensure a metadata script exists in the config dir and is used by
+        // default so it's editable both in-app and on disk.
+        match config::ensure_script_file() {
+            Ok(path) => config::update(cx, |c| {
+                if c.library.script_path.is_none() {
+                    c.library.script_path = Some(path);
+                }
+            }),
+            Err(e) => tracing::warn!("failed to create default script: {e:#}"),
+        }
+
         assets::init_themes("Gruvbox Light", cx);
 
         let store = match library::open_store() {

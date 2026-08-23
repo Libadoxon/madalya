@@ -171,8 +171,16 @@ mod tests {
         let probe = ClipProbe {
             width: 1920,
             tracks: vec![
-                crate::library::model::AudioTrack { idx: 0, label: "Game".into(), language: None },
-                crate::library::model::AudioTrack { idx: 1, label: "Track 2".into(), language: None },
+                crate::library::model::AudioTrack {
+                    idx: 0,
+                    label: "Game".into(),
+                    language: None,
+                },
+                crate::library::model::AudioTrack {
+                    idx: 1,
+                    label: "Track 2".into(),
+                    language: None,
+                },
             ],
             ..Default::default()
         };

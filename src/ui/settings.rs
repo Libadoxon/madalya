@@ -66,6 +66,11 @@ pub fn render_settings(_app: &AppView, cx: &mut Context<AppView>) -> impl IntoEl
             ),
         )
         .page(
+            SettingPage::new("Script")
+                .description("Rhai metadata script, also editable on disk. Save re-runs it across the library.")
+                .group(SettingGroup::new().item(script_editor_item(app_weak.clone(), readonly))),
+        )
+        .page(
             SettingPage::new("General").group(
                 SettingGroup::new().item(
                     bool_item(
@@ -485,6 +490,74 @@ fn number_item(
         ),
     )
     .disabled(disabled)
+}
+
+struct ScriptEditorState {
+    input: Entity<InputState>,
+}
+
+fn script_file_path(cx: &App) -> PathBuf {
+    cx.global::<Config>()
+        .library
+        .script_path
+        .clone()
+        .unwrap_or_else(config::default_script_path)
+}
+
+fn script_editor_item(app: WeakEntity<AppView>, readonly: bool) -> SettingItem {
+    SettingItem::render(move |_opts, window, cx: &mut App| {
+        render_script_editor(app.clone(), readonly, window, cx)
+    })
+    .disabled(readonly)
+}
+
+fn render_script_editor(
+    app: WeakEntity<AppView>,
+    readonly: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement + use<> {
+    let path = script_file_path(cx);
+    let state = window.use_keyed_state(SharedString::from("script-editor"), cx, |window, cx| {
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor("rust")
+                .line_number(true)
+                .default_value(contents)
+        });
+        ScriptEditorState { input }
+    });
+    let input = state.read(cx).input.clone();
+    let save_path = path.clone();
+    let save_input = input.clone();
+
+    v_flex()
+        .gap_2()
+        .child(
+            div()
+                .h(px(440.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded(cx.theme().radius)
+                .child(Input::new(&input).h_full().disabled(readonly)),
+        )
+        .child(
+            Button::new("script-save")
+                .primary()
+                .label("Save & Rescan")
+                .disabled(readonly)
+                .on_click(move |_, _window, cx| {
+                    let text = save_input.read(cx).value().to_string();
+                    if let Err(e) = std::fs::write(&save_path, &text) {
+                        tracing::error!("failed to write script: {e:#}");
+                        return;
+                    }
+                    let p = save_path.clone();
+                    config::update(cx, |c| c.library.script_path = Some(p.clone()));
+                    let _ = app.update(cx, |a, cx| a.rescan_library(cx));
+                }),
+        )
 }
 
 fn get_clips_dir(c: &Config) -> String {
