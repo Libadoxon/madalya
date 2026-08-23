@@ -170,7 +170,10 @@ impl Fullscreen {
     }
 
     fn app_dispatch(&self, action: Action, window: &mut Window, cx: &mut App) {
-        let _ = self.app.update(cx, |a, cx| a.dispatch(action, window, cx));
+        let app = self.app.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |a, cx| a.dispatch(action, window, cx));
+        });
     }
 }
 
