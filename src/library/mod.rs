@@ -81,6 +81,15 @@ impl Library {
         }
     }
 
+    pub fn set_title(&mut self, path: &Path, title: Option<&str>, cx: &mut Context<Self>) {
+        let _ = self.store.set_title(path, title);
+        let normalized = title.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(c) = self.clip_mut(path) {
+            c.title = normalized.map(str::to_owned);
+            cx.notify();
+        }
+    }
+
     pub fn set_game(&mut self, path: &Path, game: Option<&str>, cx: &mut Context<Self>) {
         let _ = self.store.set_game(path, game);
         let normalized = game.map(str::trim).filter(|s| !s.is_empty());

@@ -57,16 +57,18 @@ impl Store {
         let tx = conn.transaction()?;
         let p = path_str(&clip.path);
 
-        // Empty script output leaves the stored game untouched; a non-empty one
-        // always overwrites (script and manual edits both flow through `game`).
+        // Empty script output leaves the stored title/game untouched; a non-empty
+        // one always overwrites (script and manual edits both flow through them).
+        let title = clip.title.as_deref().filter(|s| !s.trim().is_empty());
         let game = clip.game.as_deref().filter(|s| !s.trim().is_empty());
         tx.execute(
-            "INSERT INTO clips (path, mtime, size, duration_ms, width, height, vcodec, thumb_path, game, favorite, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)
+            "INSERT INTO clips (path, mtime, size, duration_ms, width, height, vcodec, thumb_path, title, game, favorite, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11)
              ON CONFLICT(path) DO UPDATE SET
                mtime=excluded.mtime, size=excluded.size, duration_ms=excluded.duration_ms,
                width=excluded.width, height=excluded.height, vcodec=excluded.vcodec,
                thumb_path=excluded.thumb_path,
+               title=CASE WHEN excluded.title IS NOT NULL THEN excluded.title ELSE clips.title END,
                game=CASE WHEN excluded.game IS NOT NULL THEN excluded.game ELSE clips.game END",
             params![
                 p,
@@ -77,6 +79,7 @@ impl Store {
                 clip.probe.height,
                 clip.probe.vcodec,
                 clip.thumb_path.as_ref().map(|t| path_str(t)),
+                title,
                 game,
                 clip.added_at,
             ],
@@ -151,6 +154,15 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_title(&self, path: &Path, title: Option<&str>) -> Result<()> {
+        let t = title.map(str::trim).filter(|s| !s.is_empty());
+        self.lock().execute(
+            "UPDATE clips SET title = ?2 WHERE path = ?1",
+            params![path_str(path), t],
+        )?;
+        Ok(())
+    }
+
     pub fn set_game(&self, path: &Path, game: Option<&str>) -> Result<()> {
         let g = game.map(str::trim).filter(|s| !s.is_empty());
         self.lock().execute(
@@ -205,8 +217,7 @@ impl Store {
     }
 }
 
-const CLIP_COLS: &str =
-    "path, mtime, size, duration_ms, width, height, vcodec, thumb_path, game, favorite, added_at";
+const CLIP_COLS: &str = "path, mtime, size, duration_ms, width, height, vcodec, thumb_path, title, game, favorite, added_at";
 
 fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
     Ok(Clip {
@@ -222,12 +233,13 @@ fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
             container_tags: Vec::new(),
         },
         thumb_path: r.get::<_, Option<String>>(7)?.map(PathBuf::from),
-        game: r.get::<_, Option<String>>(8)?,
-        favorite: r.get::<_, i64>(9)? != 0,
+        title: r.get::<_, Option<String>>(8)?,
+        game: r.get::<_, Option<String>>(9)?,
+        favorite: r.get::<_, i64>(10)? != 0,
         tags: Vec::new(),
         meta: Vec::new(),
         track_state: Vec::new(),
-        added_at: r.get(10)?,
+        added_at: r.get(11)?,
     })
 }
 
@@ -303,6 +315,7 @@ CREATE TABLE IF NOT EXISTS clips (
     height      INTEGER NOT NULL,
     vcodec      TEXT NOT NULL,
     thumb_path  TEXT,
+    title       TEXT,
     game        TEXT,
     favorite    INTEGER NOT NULL DEFAULT 0,
     added_at    INTEGER NOT NULL
@@ -380,9 +393,10 @@ mod tests {
             },
             favorite: false,
             thumb_path: Some(PathBuf::from("/thumbs/a.jpg")),
+            title: Some("A".into()),
             game: Some("Dota 2".into()),
             tags: vec!["clip".into()],
-            meta: vec![("title".into(), "A".into())],
+            meta: vec![("kind".into(), "video".into())],
             track_state: vec![],
             added_at: 1,
         }
@@ -423,10 +437,10 @@ mod tests {
         )
         .unwrap();
 
-        // Re-scan produces new script-derived meta/tags.
+        // Re-scan produces new script-derived title/tags.
         let mut changed = sample();
         changed.mtime = 200;
-        changed.meta = vec![("title".into(), "A2".into())];
+        changed.title = Some("A2".into());
         changed.tags = vec!["clip2".into()];
         s.upsert_clip(&changed).unwrap();
 
@@ -441,10 +455,51 @@ mod tests {
             !c.tags.contains(&"clip".to_string()),
             "old script tag replaced"
         );
-        assert_eq!(c.title(), "A2", "script meta replaced");
+        assert_eq!(c.title(), "A2", "script title replaced");
         let st = c.state_for(1);
         assert_eq!(st.volume, 0.4);
         assert!(st.muted, "mixer state preserved");
+    }
+
+    #[test]
+    fn rescan_overwrites_title_but_preserves_when_script_empty() {
+        let s = tmp_store();
+        let path = PathBuf::from("/clips/a.mkv");
+        s.upsert_clip(&sample()).unwrap();
+        let raw = |s: &Store| {
+            s.load_clip(&path)
+                .unwrap()
+                .unwrap()
+                .title_raw()
+                .map(str::to_owned)
+        };
+        assert_eq!(raw(&s).as_deref(), Some("A"));
+
+        // Script re-run yields no title -> keep the stored value.
+        let mut empty = sample();
+        empty.title = None;
+        s.upsert_clip(&empty).unwrap();
+        assert_eq!(
+            raw(&s).as_deref(),
+            Some("A"),
+            "empty script title preserved"
+        );
+
+        // Manual override survives an empty re-run too.
+        s.set_title(&path, Some("My Clip")).unwrap();
+        s.upsert_clip(&empty).unwrap();
+        assert_eq!(raw(&s).as_deref(), Some("My Clip"));
+
+        // A non-empty script title always overwrites.
+        let mut has_title = sample();
+        has_title.title = Some("Scripted".into());
+        s.upsert_clip(&has_title).unwrap();
+        assert_eq!(raw(&s).as_deref(), Some("Scripted"));
+
+        // Clearing the manual title falls back to the filename stem.
+        s.set_title(&path, None).unwrap();
+        assert_eq!(raw(&s), None);
+        assert_eq!(s.load_clip(&path).unwrap().unwrap().title(), "a");
     }
 
     #[test]

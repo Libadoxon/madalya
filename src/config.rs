@@ -100,18 +100,18 @@ const SCRIPT_TEMPLATE: &str = r#"// Metadata script. Returns a map of fields der
 // steam_app_name(id) resolves a numeric Steam app id to a game title.
 
 let m = #{};
-m.title = clip.stem;
-m.tags = ["clip"];
+// m.title = clip.stem;
+// m.tags = ["clip"];
 
 // Example: filenames like "steam_app_570 - clutch" -> resolve the game.
-let head = clip.stem.split(" - ")[0];
-let segs = head.split("_");
-let last = segs[segs.len() - 1];
-try {
-    let id = parse_int(last);
-    let game = steam_app_name(id);
-    if game != "" { m.game = game; }
-} catch(e) {}
+// let head = clip.stem.split(" - ")[0];
+// let segs = head.split("_");
+// let last = segs[segs.len() - 1];
+// try {
+//    let id = parse_int(last);
+//    let game = steam_app_name(id);
+//    if game != "" { m.game = game; }
+// } catch(e) {}
 
 m
 "#;

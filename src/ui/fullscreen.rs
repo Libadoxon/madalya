@@ -30,8 +30,9 @@ pub struct Fullscreen {
     master_muted: bool,
     tag_input: Entity<InputState>,
     clear_tag: bool,
+    title_input: Entity<InputState>,
     game_input: Entity<InputState>,
-    sync_game: bool,
+    sync_fields: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -44,6 +45,7 @@ impl Fullscreen {
         cx: &mut Context<Self>,
     ) -> Self {
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag…"));
+        let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Title…"));
         let game_input = cx.new(|cx| InputState::new(window, cx).placeholder("Game…"));
         let (player, scrubber, volumes, tracks) = build_media(&clip, cx);
         let mut this = Self {
@@ -58,8 +60,9 @@ impl Fullscreen {
             master_muted: false,
             tag_input,
             clear_tag: false,
+            title_input,
             game_input,
-            sync_game: true,
+            sync_fields: true,
             _subs: Vec::new(),
         };
         this.wire(cx);
@@ -77,7 +80,7 @@ impl Fullscreen {
         self.master_muted = false;
         self._subs.clear();
         self.clear_tag = true;
-        self.sync_game = true;
+        self.sync_fields = true;
         self.wire(cx);
         cx.notify();
     }
@@ -123,6 +126,22 @@ impl Fullscreen {
                 }
             }));
         }
+
+        subs.push(
+            cx.subscribe(&self.title_input, |this, input, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let value = input.read(cx).value().trim().to_string();
+                    let title = (!value.is_empty()).then_some(value);
+                    if title.as_deref() != this.clip.title_raw() {
+                        let path = this.clip.path.clone();
+                        this.library
+                            .update(cx, |l, cx| l.set_title(&path, title.as_deref(), cx));
+                        this.clip.title = title;
+                        cx.notify();
+                    }
+                }
+            }),
+        );
 
         subs.push(
             cx.subscribe(&self.game_input, |this, input, ev: &InputEvent, cx| {
@@ -206,8 +225,11 @@ impl Render for Fullscreen {
             self.tag_input
                 .update(cx, |s, cx| s.set_value("", window, cx));
         }
-        if self.sync_game {
-            self.sync_game = false;
+        if self.sync_fields {
+            self.sync_fields = false;
+            let title = self.clip.title_raw().unwrap_or_default().to_string();
+            self.title_input
+                .update(cx, |s, cx| s.set_value(title, window, cx));
             let game = self.clip.game().unwrap_or_default().to_string();
             self.game_input
                 .update(cx, |s, cx| s.set_value(game, window, cx));
@@ -376,7 +398,6 @@ impl Fullscreen {
         let meta = v_flex().w_full().gap_1().children(
             clip.meta
                 .iter()
-                .filter(|(k, _)| k != "title")
                 .map(|(k, v)| {
                     h_flex()
                         .w_full()
@@ -420,6 +441,8 @@ impl Fullscreen {
                         }
                     )),
             )
+            .child(section_title("Title", cx))
+            .child(Input::new(&self.title_input).small())
             .child(section_title("Game", cx))
             .child(Input::new(&self.game_input).small())
             .child(section_title("Tags", cx))

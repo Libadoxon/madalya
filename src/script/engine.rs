@@ -13,6 +13,7 @@ pub struct ScriptEngine {
 }
 
 pub struct ScriptResult {
+    pub title: Option<String>,
     pub game: Option<String>,
     pub meta: Vec<(String, String)>,
     pub tags: Vec<String>,
@@ -98,6 +99,7 @@ fn build_input_map(input: &ClipInput) -> Map {
 }
 
 fn interpret(out: Map) -> ScriptResult {
+    let mut title = None;
     let mut game = None;
     let mut meta = Vec::new();
     let mut tags = Vec::new();
@@ -108,6 +110,11 @@ fn interpret(out: Map) -> ScriptResult {
             }
             continue;
         }
+        if k == "title" {
+            let t = dyn_to_string(v);
+            title = (!t.trim().is_empty()).then_some(t);
+            continue;
+        }
         if k == "game" {
             let g = dyn_to_string(v);
             game = (!g.trim().is_empty()).then_some(g);
@@ -115,7 +122,12 @@ fn interpret(out: Map) -> ScriptResult {
         }
         meta.push((k.to_string(), dyn_to_string(v)));
     }
-    ScriptResult { game, meta, tags }
+    ScriptResult {
+        title,
+        game,
+        meta,
+        tags,
+    }
 }
 
 fn dyn_to_string(v: Dynamic) -> String {
@@ -167,9 +179,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(r.tags, vec!["a".to_string(), "b".to_string()]);
-        assert!(r.meta.contains(&("title".into(), "foo bar".into())));
+        assert_eq!(r.title.as_deref(), Some("foo bar"));
         assert!(r.meta.contains(&("kind".into(), "video".into())));
-        assert!(!r.meta.iter().any(|(k, _)| k == "tags"));
+        assert!(!r.meta.iter().any(|(k, _)| k == "tags" || k == "title"));
     }
 
     #[test]

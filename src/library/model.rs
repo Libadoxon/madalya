@@ -8,6 +8,7 @@ pub struct Clip {
     pub probe: ClipProbe,
     pub favorite: bool,
     pub thumb_path: Option<PathBuf>,
+    pub title: Option<String>,
     pub game: Option<String>,
     pub tags: Vec<String>,
     pub meta: Vec<(String, String)>,
@@ -16,8 +17,11 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Effective display title: the stored/script title, else the filename stem.
     pub fn title(&self) -> String {
-        self.meta_get("title")
+        self.title
+            .as_deref()
+            .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| {
                 self.path
@@ -27,15 +31,13 @@ impl Clip {
             })
     }
 
-    pub fn game(&self) -> Option<&str> {
-        self.game.as_deref().filter(|s| !s.is_empty())
+    /// The explicitly-set title (script or manual), without the filename fallback.
+    pub fn title_raw(&self) -> Option<&str> {
+        self.title.as_deref().filter(|s| !s.is_empty())
     }
 
-    pub fn meta_get(&self, key: &str) -> Option<&str> {
-        self.meta
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+    pub fn game(&self) -> Option<&str> {
+        self.game.as_deref().filter(|s| !s.is_empty())
     }
 
     pub fn state_for(&self, idx: u32) -> TrackState {
