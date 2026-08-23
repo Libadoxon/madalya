@@ -492,8 +492,8 @@ fn build_media(
             cx.new(|_| {
                 SliderState::new()
                     .min(0.0)
-                    .max(1.5)
-                    .step(0.01)
+                    .max(4.0)
+                    .step(0.05)
                     .default_value(v)
             })
         })

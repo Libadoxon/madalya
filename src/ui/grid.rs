@@ -4,7 +4,7 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName,
     button::{Button, ButtonVariants as _},
     h_flex,
-    scroll::{Scrollbar, ScrollbarShow},
+    scroll::Scrollbar,
     v_flex,
 };
 
