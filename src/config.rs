@@ -26,6 +26,7 @@ pub struct Library {
     pub script_path: Option<PathBuf>,
     pub preview_on_hover: bool,
     pub thumb_px: u32,
+    pub max_scan_depth: u32,
 }
 
 impl Default for Library {
@@ -35,6 +36,7 @@ impl Default for Library {
             script_path: None,
             preview_on_hover: true,
             thumb_px: 320,
+            max_scan_depth: 8,
         }
     }
 }

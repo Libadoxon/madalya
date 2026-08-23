@@ -33,6 +33,7 @@ pub fn run(
     script_path: Option<PathBuf>,
     store: Store,
     thumb_px: u32,
+    max_depth: u32,
     cx: &mut App,
 ) {
     let executor = cx.background_executor().clone();
@@ -47,7 +48,7 @@ pub fn run(
             let clips_dir = clips_dir.clone();
             executor
                 .spawn(async move {
-                    let disk = walk(&clips_dir);
+                    let disk = walk(&clips_dir, max_depth);
                     let existing = store.fingerprints().unwrap_or_default();
                     let removed: Vec<PathBuf> = existing
                         .keys()
@@ -174,9 +175,13 @@ fn build_clip(
     })
 }
 
-fn walk(dir: &Path) -> HashMap<PathBuf, (i64, u64)> {
+fn walk(dir: &Path, max_depth: u32) -> HashMap<PathBuf, (i64, u64)> {
     let mut out = HashMap::new();
-    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(dir)
+        .max_depth(max_depth.max(1) as usize)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() || !is_video(entry.path()) {
             continue;
         }
@@ -211,4 +216,37 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_video, walk};
+
+    #[test]
+    fn walk_respects_max_depth() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("madalya-walk-{n}"));
+        std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+        std::fs::write(root.join("a.mp4"), b"").unwrap();
+        std::fs::write(root.join("sub/b.mp4"), b"").unwrap();
+        std::fs::write(root.join("sub/deep/c.mp4"), b"").unwrap();
+        std::fs::write(root.join("notes.txt"), b"").unwrap();
+
+        assert_eq!(walk(&root, 1).len(), 1); // a.mp4 only
+        assert_eq!(walk(&root, 2).len(), 2); // + sub/b.mp4
+        assert_eq!(walk(&root, 8).len(), 3); // + sub/deep/c.mp4, .txt ignored
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_video_extensions() {
+        assert!(is_video(std::path::Path::new("x.MKV")));
+        assert!(is_video(std::path::Path::new("x.mp4")));
+        assert!(!is_video(std::path::Path::new("x.txt")));
+        assert!(!is_video(std::path::Path::new("x")));
+    }
 }

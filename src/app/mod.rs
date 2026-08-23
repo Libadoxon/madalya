@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{ActiveTheme as _, button::*, *};
+use gpui_component::{button::*, button::*, button *};
 
 use crate::config::Config;
-use crate::keybinds::{Action, KeyBind, is_cancel_gesture, is_unbind_gesture};
+use crate::keybinds::{re, Action, KeyBind, Action, KeyBind, Action, KeyBind};
 use crate::library::Library;
 use crate::media::player::{Player, PlayerOptions};
 use crate::ui::fullscreen::Fullscreen;
@@ -27,7 +27,7 @@ pub(crate) struct PreviewState {
     pub player: Entity<Player>,
 }
 
-type LibCfgKey = (Option<PathBuf>, Option<PathBuf>);
+type LibCfgKey = (Option<PathBuf>, Option<PathBuf>, u32);
 
 pub struct AppView {
     pub(crate) settings_open: bool,
@@ -39,6 +39,7 @@ pub struct AppView {
     pub(crate) fullscreen: Option<Entity<Fullscreen>>,
     pub(crate) preview: Option<PreviewState>,
     last_lib_cfg: LibCfgKey,
+    pending_rescan: bool,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -77,6 +78,7 @@ impl AppView {
             fullscreen: None,
             preview: None,
             last_lib_cfg,
+            pending_rescan: false,
             _subscriptions: vec![config_sub, lib_sub],
         }
     }
@@ -85,7 +87,12 @@ impl AppView {
         let key = lib_cfg_key(cx);
         if key != self.last_lib_cfg {
             self.last_lib_cfg = key;
-            self.library.update(cx, |l, cx| l.rescan(cx));
+            // Defer while settings are open so typing a path doesn't scan.
+            if self.settings_open {
+                self.pending_rescan = true;
+            } else {
+                self.library.update(cx, |l, cx| l.rescan(cx));
+            }
         }
     }
 
@@ -190,7 +197,12 @@ impl AppView {
     }
 
     pub(crate) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        let closing = self.settings_open;
         self.settings_open = !self.settings_open;
+        if closing && self.pending_rescan {
+            self.pending_rescan = false;
+            self.rescan_library(cx);
+        }
         cx.notify();
     }
 
@@ -296,7 +308,11 @@ impl AppView {
 
 fn lib_cfg_key(cx: &App) -> LibCfgKey {
     let lib = &cx.global::<Config>().library;
-    (lib.clips_dir.clone(), lib.script_path.clone())
+    (
+        lib.clips_dir.clone(),
+        lib.script_path.clone(),
+        lib.max_scan_depth,
+    )
 }
 
 impl Render for AppView {

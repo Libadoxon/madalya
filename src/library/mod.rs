@@ -68,6 +68,7 @@ impl Library {
             cfg.script_path.clone(),
             self.store.clone(),
             cfg.thumb_px.max(1),
+            cfg.max_scan_depth,
             cx,
         );
     }

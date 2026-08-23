@@ -62,7 +62,21 @@ pub fn render_settings(_app: &AppView, cx: &mut Context<AppView>) -> impl IntoEl
                         },
                         |c| c.library.thumb_px as f64,
                         |c, v| c.library.thumb_px = v.clamp(80.0, 1_000.0) as u32,
-                    )),
+                    ))
+                    .item(
+                        number_item(
+                            "Max scan depth",
+                            readonly,
+                            NumberFieldOptions {
+                                min: 1.0,
+                                max: 64.0,
+                                step: 1.0,
+                            },
+                            |c| c.library.max_scan_depth as f64,
+                            |c, v| c.library.max_scan_depth = v.clamp(1.0, 64.0) as u32,
+                        )
+                        .description("How many folder levels below the clip home to scan."),
+                    ),
             ),
         )
         .page(
