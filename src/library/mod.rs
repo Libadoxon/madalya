@@ -126,6 +126,8 @@ impl Library {
             Some(existing) => *existing = clip,
             None => self.clips.push(clip),
         }
+        self.clips
+            .sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
         cx.notify();
     }
 

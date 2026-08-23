@@ -1,11 +1,14 @@
 use std::path::PathBuf;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, ThemeRegistry,
+    ActiveTheme as _, AxisExt as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _,
+    ThemeRegistry, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
+    notification::Notification,
     popover::Popover,
     select::{SearchableVec, Select, SelectEvent, SelectState},
     setting::{
@@ -33,20 +36,22 @@ pub fn render_settings(_app: &AppView, cx: &mut Context<AppView>) -> impl IntoEl
             SettingPage::new("Library").default_open(true).group(
                 SettingGroup::new()
                     .item(
-                        input_item(
+                        path_item(
                             "Clips directory",
                             readonly,
                             get_clips_dir,
                             set_clips_dir,
+                            PathKind::Dir,
                         )
                         .description("Folder scanned recursively for video clips."),
                     )
                     .item(
-                        input_item(
+                        path_item(
                             "Metadata script",
                             readonly,
                             get_script_path,
                             set_script_path,
+                            PathKind::File,
                         )
                         .description("Optional Rhai script that derives per-clip metadata and tags."),
                     )
@@ -478,20 +483,110 @@ fn bool_item(
     .disabled(disabled)
 }
 
-fn input_item(
+#[derive(Clone, Copy, PartialEq)]
+enum PathKind {
+    Dir,
+    File,
+}
+
+struct PathInputState {
+    input: Entity<InputState>,
+    _sub: Subscription,
+}
+
+/// A free-form path field. Accepts any text, commits on Enter/Blur (so it
+/// never fights per-keystroke), and shows an error notification if the path
+/// doesn't exist.
+fn path_item(
     label: &'static str,
-    disabled: bool,
+    readonly: bool,
     get: fn(&Config) -> String,
     set: fn(&mut Config, String),
+    kind: PathKind,
 ) -> SettingItem {
     SettingItem::new(
         label,
-        SettingField::input(
-            move |cx: &App| SharedString::from(get(cx.global::<Config>())),
-            move |val: SharedString, cx: &mut App| config::update(cx, |c| set(c, val.to_string())),
+        SettingField::element(
+            move |opts: &RenderOptions, window: &mut Window, cx: &mut App| {
+                render_path_input(label, get, set, kind, readonly, opts.layout, window, cx)
+            },
         ),
     )
-    .disabled(disabled)
+    .disabled(readonly)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_path_input(
+    key: &'static str,
+    get: fn(&Config) -> String,
+    set: fn(&mut Config, String),
+    kind: PathKind,
+    readonly: bool,
+    layout: Axis,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let current = get(cx.global::<Config>());
+    let state = window.use_keyed_state(
+        SharedString::from(format!("path-input-{key}")),
+        cx,
+        |window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx).default_value(current.clone()));
+            let sub = cx.subscribe_in(
+                &input,
+                window,
+                move |_this, input, ev: &InputEvent, window, cx| {
+                    if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        commit_path(input.read(cx).value().to_string(), set, kind, window, cx);
+                    }
+                },
+            );
+            PathInputState { input, _sub: sub }
+        },
+    );
+
+    let input = state.read(cx).input.clone();
+    let focused = input.read(cx).focus_handle(cx).is_focused(window);
+    if !focused && input.read(cx).value() != current.as_str() {
+        input.update(cx, |s, cx| s.set_value(current.clone(), window, cx));
+    }
+
+    Input::new(&input)
+        .disabled(readonly)
+        .map(|this| {
+            if layout.is_horizontal() {
+                this.w_96()
+            } else {
+                this.w_full()
+            }
+        })
+        .into_any_element()
+}
+
+fn commit_path(
+    raw: String,
+    set: fn(&mut Config, String),
+    kind: PathKind,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let path = raw.trim().to_string();
+    config::update(cx, |c| set(c, path.clone()));
+    if path.is_empty() {
+        return;
+    }
+    let p = std::path::Path::new(&path);
+    let ok = match kind {
+        PathKind::Dir => p.is_dir(),
+        PathKind::File => p.is_file(),
+    };
+    if !ok {
+        let what = match kind {
+            PathKind::Dir => "directory",
+            PathKind::File => "file",
+        };
+        window.push_notification(Notification::error(format!("No such {what}: {path}")), cx);
+    }
 }
 
 fn number_item(

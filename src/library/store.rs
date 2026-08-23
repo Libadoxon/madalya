@@ -111,7 +111,7 @@ impl Store {
     pub fn load_all(&self) -> Result<Vec<Clip>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {CLIP_COLS} FROM clips ORDER BY added_at ASC, path ASC"
+            "SELECT {CLIP_COLS} FROM clips ORDER BY mtime DESC, path ASC"
         ))?;
         let mut clips: Vec<Clip> = stmt
             .query_map([], row_to_clip)?

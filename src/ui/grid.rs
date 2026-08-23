@@ -3,7 +3,9 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    h_flex,
+    scroll::{Scrollbar, ScrollbarShow},
+    v_flex,
 };
 
 use crate::app::AppView;
@@ -61,11 +63,36 @@ pub fn render_grid(
         })
         .collect();
 
-    v_flex()
-        .id("grid-scroll")
-        .size_full()
-        .overflow_y_scroll()
-        .child(h_flex().flex_wrap().gap_3().p_3().children(tiles))
+    let scroll = app.grid_scroll.clone();
+    div()
+        .relative()
+        .flex_1()
+        .min_h(px(0.))
+        .child(
+            v_flex()
+                .id("grid-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap_3()
+                        .p_3()
+                        .pb_16()
+                        .children(tiles),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .child(Scrollbar::vertical(&scroll)),
+        )
         .into_any_element()
 }
 
