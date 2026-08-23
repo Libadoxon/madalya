@@ -261,7 +261,7 @@ fn build_pipeline(
     tx: smol::channel::Sender<PlayerMsg>,
 ) -> anyhow::Result<gst::Pipeline> {
     let pipeline = gst::Pipeline::new();
-    let src = gst::ElementFactory::make("uridecodebin3")
+    let src = gst::ElementFactory::make("uridecodebin")
         .property("uri", uri)
         .build()?;
     let videoconvert = gst::ElementFactory::make("videoconvert").build()?;
@@ -359,7 +359,12 @@ fn build_pipeline(
             }
             Some(mixer) => {
                 let idx = counter.fetch_add(1, Ordering::SeqCst);
-                let Ok(vol) = gst::ElementFactory::make("volume").build() else {
+                let (Ok(queue), Ok(conv), Ok(resample), Ok(vol)) = (
+                    gst::ElementFactory::make("queue").build(),
+                    gst::ElementFactory::make("audioconvert").build(),
+                    gst::ElementFactory::make("audioresample").build(),
+                    gst::ElementFactory::make("volume").build(),
+                ) else {
                     return;
                 };
                 let st = states
@@ -370,14 +375,17 @@ fn build_pipeline(
                 vol.set_property("volume", st.volume);
                 vol.set_property("mute", st.muted);
 
-                if pipeline.add(&vol).is_err() {
+                let chain = [&queue, &conv, &resample, &vol];
+                if pipeline.add_many(chain).is_err() || gst::Element::link_many(chain).is_err() {
                     return;
                 }
-                let _ = vol.sync_state_with_parent();
-                let Some(vol_sink) = vol.static_pad("sink") else {
+                for el in chain {
+                    let _ = el.sync_state_with_parent();
+                }
+                let Some(queue_sink) = queue.static_pad("sink") else {
                     return;
                 };
-                if pad.link(&vol_sink).is_err() {
+                if pad.link(&queue_sink).is_err() {
                     return;
                 }
                 if let (Some(vol_src), Some(mixer_sink)) =
@@ -440,5 +448,36 @@ mod tests {
             }
             other => panic!("expected a frame, got {:?}", other.is_some()),
         }
+    }
+
+    #[test]
+    fn pipeline_wires_all_audio_tracks() {
+        let clip = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join("clips-test/steam_app_570 - teamfight.mkv");
+        if !clip.exists() {
+            eprintln!("skipping: no multi-track test clip at {clip:?}");
+            return;
+        }
+        crate::media::init().unwrap();
+        let uri = crate::media::path_to_uri(&clip).unwrap();
+        let (tx, _rx) = smol::channel::bounded::<PlayerMsg>(4);
+        let vols = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = build_pipeline(
+            &uri,
+            PlayerOptions {
+                muted: false,
+                looping: false,
+                preview_width: None,
+            },
+            Vec::new(),
+            vols.clone(),
+            tx,
+        )
+        .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        smol::block_on(smol::Timer::after(Duration::from_secs(3)));
+        let n = vols.lock().unwrap().len();
+        let _ = pipeline.set_state(gst::State::Null);
+        assert_eq!(n, 3, "got {n} audio tracks wired");
     }
 }

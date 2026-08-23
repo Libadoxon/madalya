@@ -3,8 +3,10 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
+    popover::Popover,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -137,11 +139,11 @@ impl Fullscreen {
         self._subs = subs;
     }
 
-    fn set_track_mute(&mut self, i: usize, cx: &mut Context<Self>) {
+    fn set_track_enabled(&mut self, i: usize, enabled: bool, cx: &mut Context<Self>) {
         let Some(st) = self.tracks.get_mut(i) else {
             return;
         };
-        st.muted = !st.muted;
+        st.muted = !enabled;
         let st = *st;
         self.player.read(cx).set_track(st.idx, st.volume, st.muted);
         let path = self.clip.path.clone();
@@ -229,6 +231,28 @@ impl Fullscreen {
         } else {
             IconName::Play
         };
+
+        let weak = cx.entity().downgrade();
+        let tracks: Vec<(String, bool, Option<Entity<SliderState>>)> = self
+            .clip
+            .probe
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let enabled = !self.tracks.get(i).map(|s| s.muted).unwrap_or(false);
+                (t.label.clone(), enabled, self.volumes.get(i).cloned())
+            })
+            .collect();
+        let audio = Popover::new("audio-mixer")
+            .trigger(
+                Button::new("audio")
+                    .ghost()
+                    .icon(IconName::Settings2)
+                    .tooltip("Audio tracks"),
+            )
+            .content(move |_, _, _| audio_mixer_content(&weak, &tracks));
+
         h_flex()
             .w_full()
             .gap_2()
@@ -264,6 +288,7 @@ impl Fullscreen {
             .child(div().text_sm().child(fmt_time(position)))
             .child(div().flex_1().child(Slider::new(&self.scrubber)))
             .child(div().text_sm().child(fmt_time(duration)))
+            .child(audio)
             .child(
                 Button::new("mute")
                     .ghost()
@@ -286,46 +311,6 @@ impl Fullscreen {
 
     fn render_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let clip = &self.clip;
-
-        let mixer = v_flex().w_full().gap_2().children(
-            clip.probe
-                .tracks
-                .iter()
-                .enumerate()
-                .map(|(i, track)| {
-                    let st = self
-                        .tracks
-                        .get(i)
-                        .copied()
-                        .unwrap_or(TrackState::default_for(track.idx));
-                    let slider = self.volumes.get(i).cloned();
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            div()
-                                .w(px(90.))
-                                .truncate()
-                                .text_sm()
-                                .child(track.label.clone()),
-                        )
-                        .child(
-                            Button::new(("mute-track", i))
-                                .ghost()
-                                .xsmall()
-                                .label(if st.muted { "M" } else { "•" })
-                                .on_click(
-                                    cx.listener(move |this, _, _w, cx| this.set_track_mute(i, cx)),
-                                ),
-                        )
-                        .when_some(slider, |el, s| {
-                            el.child(div().flex_1().child(Slider::new(&s)))
-                        })
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>(),
-        );
 
         let tags = h_flex().w_full().flex_wrap().gap_1().children(
             clip.tags
@@ -404,8 +389,6 @@ impl Fullscreen {
                         }
                     )),
             )
-            .child(section_title("Audio", cx))
-            .child(mixer)
             .child(section_title("Tags", cx))
             .child(tags)
             .child(Input::new(&self.tag_input).small())
@@ -413,6 +396,43 @@ impl Fullscreen {
             .child(meta)
             .into_any_element()
     }
+}
+
+fn audio_mixer_content(
+    weak: &WeakEntity<Fullscreen>,
+    tracks: &[(String, bool, Option<Entity<SliderState>>)],
+) -> AnyElement {
+    let rows = tracks
+        .iter()
+        .enumerate()
+        .map(|(i, (label, enabled, slider))| {
+            let enabled = *enabled;
+            let weak = weak.clone();
+            h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .child(
+                    Checkbox::new(("track-enabled", i))
+                        .checked(enabled)
+                        .on_click(move |checked, _window, cx| {
+                            let checked = *checked;
+                            let _ =
+                                weak.update(cx, |this, cx| this.set_track_enabled(i, checked, cx));
+                        }),
+                )
+                .child(div().w(px(96.)).truncate().text_sm().child(label.clone()))
+                .when_some(slider.clone(), |el, s| {
+                    el.child(div().flex_1().child(Slider::new(&s).disabled(!enabled)))
+                })
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
+    v_flex()
+        .w(px(300.))
+        .gap_2()
+        .children(rows)
+        .into_any_element()
 }
 
 fn section_title(label: &str, cx: &App) -> impl IntoElement {
