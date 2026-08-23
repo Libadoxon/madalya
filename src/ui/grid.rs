@@ -142,14 +142,14 @@ fn tile(
         )
         .child(div().w_full().truncate().text_sm().child(clip.title()))
         .on_click(cx.listener(move |this, _, window, cx| this.open_fullscreen(idx, window, cx)))
-        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+        .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
             if *hovered {
-                if preview_on_hover {
-                    this.start_preview(path_hover.clone(), cx);
-                }
                 this.select(idx, cx);
-            } else {
-                this.stop_preview(window, cx);
+                if preview_on_hover {
+                    this.hover_clip(path_hover.clone(), cx);
+                }
+            } else if preview_on_hover {
+                this.unhover_clip(&path_hover, cx);
             }
         }))
         .into_any_element()

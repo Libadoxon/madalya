@@ -38,6 +38,8 @@ pub struct AppView {
     pub(crate) selected: usize,
     pub(crate) fullscreen: Option<Entity<Fullscreen>>,
     pub(crate) preview: Option<PreviewState>,
+    hover_target: Option<PathBuf>,
+    preview_debounce: Option<Task<()>>,
     last_lib_cfg: LibCfgKey,
     pending_rescan: bool,
     pub(crate) _subscriptions: Vec<Subscription>,
@@ -68,18 +70,6 @@ impl AppView {
         let last_lib_cfg = lib_cfg_key(cx);
         library.update(cx, |l, cx| l.rescan(cx));
 
-        if std::env::var("MADALYA_HEARTBEAT").is_ok() {
-            cx.spawn(async move |_this, _cx| {
-                let mut n = 0u64;
-                loop {
-                    smol::Timer::after(std::time::Duration::from_millis(1000)).await;
-                    n += 1;
-                    tracing::info!("heartbeat {n}");
-                }
-            })
-            .detach();
-        }
-
         Self {
             settings_open: false,
             recording: None,
@@ -89,6 +79,8 @@ impl AppView {
             selected: 0,
             fullscreen: None,
             preview: None,
+            hover_target: None,
+            preview_debounce: None,
             last_lib_cfg,
             pending_rescan: false,
             _subscriptions: vec![config_sub, lib_sub],
@@ -239,7 +231,7 @@ impl AppView {
         let next = (self.selected as i64 + delta).rem_euclid(count as i64) as usize;
         self.selected = next;
         if self.mode == Mode::Fullscreen {
-            self.stop_preview(window, cx);
+            self.stop_preview(cx);
             let clip = self.library.read(cx).clip(next).cloned();
             if let (Some(fs), Some(clip)) = (&self.fullscreen, clip) {
                 fs.update(cx, |f, cx| f.load(clip, window, cx));
@@ -258,7 +250,9 @@ impl AppView {
             return;
         };
         self.selected = idx;
-        self.stop_preview(window, cx);
+        self.hover_target = None;
+        self.preview_debounce = None;
+        self.stop_preview(cx);
         let library = self.library.clone();
         let app = cx.weak_entity();
         let fs = cx.new(|cx| Fullscreen::new(library, app, clip, window, cx));
@@ -287,7 +281,34 @@ impl AppView {
             .update(cx, |l, cx| l.set_favorite(&clip.path, !clip.favorite, cx));
     }
 
-    pub(crate) fn start_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    /// Cursor entered a tile. Debounced so scrolling past tiles doesn't spin up
+    /// a GStreamer pipeline for every one — only start after the cursor rests.
+    pub(crate) fn hover_clip(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.hover_target.as_ref() == Some(&path) {
+            return;
+        }
+        self.hover_target = Some(path.clone());
+        self.preview_debounce = Some(cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.hover_target.as_ref() == Some(&path) {
+                    this.start_preview(path.clone(), cx);
+                }
+            });
+        }));
+    }
+
+    /// Cursor left a tile. Only clears if it's still the current hover target so
+    /// a stale leave (after we've moved to a new tile) doesn't cancel it.
+    pub(crate) fn unhover_clip(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if self.hover_target.as_deref() == Some(path) {
+            self.hover_target = None;
+            self.preview_debounce = None;
+            self.stop_preview(cx);
+        }
+    }
+
+    fn start_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.preview.as_ref().is_some_and(|p| p.path == path) {
             return;
         }
@@ -304,7 +325,7 @@ impl AppView {
         cx.notify();
     }
 
-    pub(crate) fn stop_preview(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn stop_preview(&mut self, cx: &mut Context<Self>) {
         if self.preview.take().is_some() {
             cx.notify();
         }

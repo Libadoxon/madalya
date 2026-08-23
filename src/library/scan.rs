@@ -110,7 +110,6 @@ pub fn run(
             }
         }
 
-        tracing::info!("scan complete");
         let _ = library.update(cx, |l, cx| l.set_scanning(false, cx));
     })
     .detach();
