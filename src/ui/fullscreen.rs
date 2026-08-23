@@ -30,6 +30,8 @@ pub struct Fullscreen {
     master_muted: bool,
     tag_input: Entity<InputState>,
     clear_tag: bool,
+    game_input: Entity<InputState>,
+    sync_game: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -42,6 +44,7 @@ impl Fullscreen {
         cx: &mut Context<Self>,
     ) -> Self {
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag…"));
+        let game_input = cx.new(|cx| InputState::new(window, cx).placeholder("Game…"));
         let (player, scrubber, volumes, tracks) = build_media(&clip, cx);
         let mut this = Self {
             library,
@@ -55,6 +58,8 @@ impl Fullscreen {
             master_muted: false,
             tag_input,
             clear_tag: false,
+            game_input,
+            sync_game: true,
             _subs: Vec::new(),
         };
         this.wire(cx);
@@ -72,6 +77,7 @@ impl Fullscreen {
         self.master_muted = false;
         self._subs.clear();
         self.clear_tag = true;
+        self.sync_game = true;
         self.wire(cx);
         cx.notify();
     }
@@ -117,6 +123,22 @@ impl Fullscreen {
                 }
             }));
         }
+
+        subs.push(
+            cx.subscribe(&self.game_input, |this, input, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let value = input.read(cx).value().trim().to_string();
+                    let game = (!value.is_empty()).then_some(value);
+                    if game.as_deref() != this.clip.game() {
+                        let path = this.clip.path.clone();
+                        this.library
+                            .update(cx, |l, cx| l.set_game(&path, game.as_deref(), cx));
+                        this.clip.game = game;
+                        cx.notify();
+                    }
+                }
+            }),
+        );
 
         subs.push(
             cx.subscribe(&self.tag_input, |this, input, ev: &InputEvent, cx| {
@@ -183,6 +205,12 @@ impl Render for Fullscreen {
             self.clear_tag = false;
             self.tag_input
                 .update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        if self.sync_game {
+            self.sync_game = false;
+            let game = self.clip.game().unwrap_or_default().to_string();
+            self.game_input
+                .update(cx, |s, cx| s.set_value(game, window, cx));
         }
 
         let position = self.player.read(cx).position_ms();
@@ -392,6 +420,8 @@ impl Fullscreen {
                         }
                     )),
             )
+            .child(section_title("Game", cx))
+            .child(Input::new(&self.game_input).small())
             .child(section_title("Tags", cx))
             .child(tags)
             .child(Input::new(&self.tag_input).small())

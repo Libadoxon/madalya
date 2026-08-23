@@ -8,6 +8,7 @@ pub struct Clip {
     pub probe: ClipProbe,
     pub favorite: bool,
     pub thumb_path: Option<PathBuf>,
+    pub game: Option<String>,
     pub tags: Vec<String>,
     pub meta: Vec<(String, String)>,
     pub track_state: Vec<TrackState>,
@@ -24,6 +25,10 @@ impl Clip {
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default()
             })
+    }
+
+    pub fn game(&self) -> Option<&str> {
+        self.game.as_deref().filter(|s| !s.is_empty())
     }
 
     pub fn meta_get(&self, key: &str) -> Option<&str> {

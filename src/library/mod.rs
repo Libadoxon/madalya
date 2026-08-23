@@ -81,6 +81,15 @@ impl Library {
         }
     }
 
+    pub fn set_game(&mut self, path: &Path, game: Option<&str>, cx: &mut Context<Self>) {
+        let _ = self.store.set_game(path, game);
+        let normalized = game.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(c) = self.clip_mut(path) {
+            c.game = normalized.map(str::to_owned);
+            cx.notify();
+        }
+    }
+
     pub fn add_tag(&mut self, path: &Path, tag: &str, cx: &mut Context<Self>) {
         let _ = self.store.add_tag(path, tag);
         if let Some(c) = self.clip_mut(path)

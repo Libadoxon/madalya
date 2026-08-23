@@ -13,6 +13,7 @@ pub struct ScriptEngine {
 }
 
 pub struct ScriptResult {
+    pub game: Option<String>,
     pub meta: Vec<(String, String)>,
     pub tags: Vec<String>,
 }
@@ -97,6 +98,7 @@ fn build_input_map(input: &ClipInput) -> Map {
 }
 
 fn interpret(out: Map) -> ScriptResult {
+    let mut game = None;
     let mut meta = Vec::new();
     let mut tags = Vec::new();
     for (k, v) in out {
@@ -106,9 +108,14 @@ fn interpret(out: Map) -> ScriptResult {
             }
             continue;
         }
+        if k == "game" {
+            let g = dyn_to_string(v);
+            game = (!g.trim().is_empty()).then_some(g);
+            continue;
+        }
         meta.push((k.to_string(), dyn_to_string(v)));
     }
-    ScriptResult { meta, tags }
+    ScriptResult { game, meta, tags }
 }
 
 fn dyn_to_string(v: Dynamic) -> String {

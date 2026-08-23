@@ -145,20 +145,20 @@ fn build_clip(
         }
     };
 
-    let (meta, tags) = match engine {
+    let (game, meta, tags) = match engine {
         Some(e) => match e.run(ClipInput {
             path,
             mtime,
             size,
             probe: &probe,
         }) {
-            Ok(r) => (r.meta, r.tags),
+            Ok(r) => (r.game, r.meta, r.tags),
             Err(err) => {
                 tracing::warn!("script error for {path:?}: {err:#}");
-                (Vec::new(), Vec::new())
+                (None, Vec::new(), Vec::new())
             }
         },
-        None => (Vec::new(), Vec::new()),
+        None => (None, Vec::new(), Vec::new()),
     };
 
     Ok(Clip {
@@ -168,6 +168,7 @@ fn build_clip(
         probe,
         favorite: false,
         thumb_path,
+        game,
         tags,
         meta,
         track_state: Vec::new(),

@@ -57,13 +57,17 @@ impl Store {
         let tx = conn.transaction()?;
         let p = path_str(&clip.path);
 
+        // Empty script output leaves the stored game untouched; a non-empty one
+        // always overwrites (script and manual edits both flow through `game`).
+        let game = clip.game.as_deref().filter(|s| !s.trim().is_empty());
         tx.execute(
-            "INSERT INTO clips (path, mtime, size, duration_ms, width, height, vcodec, thumb_path, favorite, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
+            "INSERT INTO clips (path, mtime, size, duration_ms, width, height, vcodec, thumb_path, game, favorite, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)
              ON CONFLICT(path) DO UPDATE SET
                mtime=excluded.mtime, size=excluded.size, duration_ms=excluded.duration_ms,
                width=excluded.width, height=excluded.height, vcodec=excluded.vcodec,
-               thumb_path=excluded.thumb_path",
+               thumb_path=excluded.thumb_path,
+               game=CASE WHEN excluded.game IS NOT NULL THEN excluded.game ELSE clips.game END",
             params![
                 p,
                 clip.mtime,
@@ -73,6 +77,7 @@ impl Store {
                 clip.probe.height,
                 clip.probe.vcodec,
                 clip.thumb_path.as_ref().map(|t| path_str(t)),
+                game,
                 clip.added_at,
             ],
         )?;
@@ -146,6 +151,15 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_game(&self, path: &Path, game: Option<&str>) -> Result<()> {
+        let g = game.map(str::trim).filter(|s| !s.is_empty());
+        self.lock().execute(
+            "UPDATE clips SET game = ?2 WHERE path = ?1",
+            params![path_str(path), g],
+        )?;
+        Ok(())
+    }
+
     pub fn add_tag(&self, path: &Path, tag: &str) -> Result<()> {
         self.lock().execute(
             "INSERT OR IGNORE INTO tags (path, tag, source) VALUES (?1, ?2, 'user')",
@@ -192,7 +206,7 @@ impl Store {
 }
 
 const CLIP_COLS: &str =
-    "path, mtime, size, duration_ms, width, height, vcodec, thumb_path, favorite, added_at";
+    "path, mtime, size, duration_ms, width, height, vcodec, thumb_path, game, favorite, added_at";
 
 fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
     Ok(Clip {
@@ -208,11 +222,12 @@ fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
             container_tags: Vec::new(),
         },
         thumb_path: r.get::<_, Option<String>>(7)?.map(PathBuf::from),
-        favorite: r.get::<_, i64>(8)? != 0,
+        game: r.get::<_, Option<String>>(8)?,
+        favorite: r.get::<_, i64>(9)? != 0,
         tags: Vec::new(),
         meta: Vec::new(),
         track_state: Vec::new(),
-        added_at: r.get(9)?,
+        added_at: r.get(10)?,
     })
 }
 
@@ -288,6 +303,7 @@ CREATE TABLE IF NOT EXISTS clips (
     height      INTEGER NOT NULL,
     vcodec      TEXT NOT NULL,
     thumb_path  TEXT,
+    game        TEXT,
     favorite    INTEGER NOT NULL DEFAULT 0,
     added_at    INTEGER NOT NULL
 );
@@ -364,11 +380,9 @@ mod tests {
             },
             favorite: false,
             thumb_path: Some(PathBuf::from("/thumbs/a.jpg")),
+            game: Some("Dota 2".into()),
             tags: vec!["clip".into()],
-            meta: vec![
-                ("title".into(), "A".into()),
-                ("game".into(), "Dota 2".into()),
-            ],
+            meta: vec![("title".into(), "A".into())],
             track_state: vec![],
             added_at: 1,
         }
@@ -383,7 +397,7 @@ mod tests {
         let c = &clips[0];
         assert_eq!(c.probe.tracks.len(), 2);
         assert_eq!(c.title(), "A");
-        assert_eq!(c.meta_get("game"), Some("Dota 2"));
+        assert_eq!(c.game(), Some("Dota 2"));
         assert_eq!(c.tags, vec!["clip".to_string()]);
 
         let fp = s.fingerprints().unwrap();
@@ -431,6 +445,42 @@ mod tests {
         let st = c.state_for(1);
         assert_eq!(st.volume, 0.4);
         assert!(st.muted, "mixer state preserved");
+    }
+
+    #[test]
+    fn rescan_overwrites_game_but_preserves_when_script_empty() {
+        let s = tmp_store();
+        let path = PathBuf::from("/clips/a.mkv");
+        s.upsert_clip(&sample()).unwrap();
+        assert_eq!(s.load_clip(&path).unwrap().unwrap().game(), Some("Dota 2"));
+
+        // Script re-run yields no game -> keep the stored value.
+        let mut empty = sample();
+        empty.game = None;
+        s.upsert_clip(&empty).unwrap();
+        assert_eq!(
+            s.load_clip(&path).unwrap().unwrap().game(),
+            Some("Dota 2"),
+            "empty script game preserves stored value"
+        );
+
+        // Manual override survives an empty re-run too.
+        s.set_game(&path, Some("Celeste")).unwrap();
+        s.upsert_clip(&empty).unwrap();
+        assert_eq!(s.load_clip(&path).unwrap().unwrap().game(), Some("Celeste"));
+
+        // A non-empty script game always overwrites.
+        let mut has_game = sample();
+        has_game.game = Some("Portal 2".into());
+        s.upsert_clip(&has_game).unwrap();
+        assert_eq!(
+            s.load_clip(&path).unwrap().unwrap().game(),
+            Some("Portal 2")
+        );
+
+        // Clearing the manual game.
+        s.set_game(&path, None).unwrap();
+        assert_eq!(s.load_clip(&path).unwrap().unwrap().game(), None);
     }
 
     #[test]
