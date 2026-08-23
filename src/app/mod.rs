@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{button::*, button::*, button *};
+use gpui_component::{ActiveTheme as _, button::*, *};
 
 use crate::config::Config;
-use crate::keybinds::{re, Action, KeyBind, Action, KeyBind, Action, KeyBind};
+use crate::keybinds::{Action, KeyBind, is_cancel_gesture, is_unbind_gesture};
 use crate::library::Library;
 use crate::media::player::{Player, PlayerOptions};
 use crate::ui::fullscreen::Fullscreen;
@@ -67,6 +67,18 @@ impl AppView {
 
         let last_lib_cfg = lib_cfg_key(cx);
         library.update(cx, |l, cx| l.rescan(cx));
+
+        if std::env::var("MADALYA_HEARTBEAT").is_ok() {
+            cx.spawn(async move |_this, _cx| {
+                let mut n = 0u64;
+                loop {
+                    smol::Timer::after(std::time::Duration::from_millis(1000)).await;
+                    n += 1;
+                    tracing::info!("heartbeat {n}");
+                }
+            })
+            .detach();
+        }
 
         Self {
             settings_open: false,
