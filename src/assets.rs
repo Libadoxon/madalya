@@ -44,12 +44,14 @@ impl AssetSource for Assets {
 #[allow(dead_code)]
 pub enum IconName {
     CircleDot,
+    Funnel,
 }
 
 impl IconNamed for IconName {
     fn path(self) -> SharedString {
         match self {
             IconName::CircleDot => "icons/circle-dot.svg",
+            IconName::Funnel => "icons/funnel.svg",
         }
         .into()
     }

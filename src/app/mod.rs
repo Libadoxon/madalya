@@ -9,7 +9,9 @@ use gpui_component::{ActiveTheme as _, button::*, *};
 use crate::config::Config;
 use crate::keybinds::{Action, KeyBind, is_cancel_gesture, is_unbind_gesture};
 use crate::library::Library;
+use crate::library::model::Clip;
 use crate::media::player::{Player, PlayerOptions};
+use crate::ui::filter::{FilterEvent, FilterState};
 use crate::ui::fullscreen::Fullscreen;
 use crate::ui::grid::render_grid;
 use crate::ui::settings::render_settings;
@@ -38,6 +40,7 @@ pub struct AppView {
     pub(crate) selected: usize,
     pub(crate) fullscreen: Option<Entity<Fullscreen>>,
     pub(crate) preview: Option<PreviewState>,
+    pub(crate) filter: Entity<FilterState>,
     pub(crate) grid_scroll: ScrollHandle,
     hover_target: Option<PathBuf>,
     preview_debounce: Option<Task<()>>,
@@ -68,6 +71,12 @@ impl AppView {
         });
         let lib_sub = cx.observe(&library, |_this, _lib, cx| cx.notify());
 
+        let filter = cx.new(|cx| FilterState::new(window, cx));
+        let filter_sub = cx.subscribe(&filter, |this, _f, _ev: &FilterEvent, cx| {
+            this.selected = 0;
+            cx.notify();
+        });
+
         let last_lib_cfg = lib_cfg_key(cx);
         library.update(cx, |l, cx| l.rescan(false, cx));
 
@@ -80,12 +89,13 @@ impl AppView {
             selected: 0,
             fullscreen: None,
             preview: None,
+            filter,
             grid_scroll: ScrollHandle::new(),
             hover_target: None,
             preview_debounce: None,
             last_lib_cfg,
             pending_rescan: false,
-            _subscriptions: vec![config_sub, lib_sub],
+            _subscriptions: vec![config_sub, lib_sub, filter_sub],
         }
     }
 
@@ -216,8 +226,20 @@ impl AppView {
         self.library.update(cx, |l, cx| l.rescan(force, cx));
     }
 
+    /// Clips passing the active filters, in library order.
+    pub(crate) fn visible_clips(&self, cx: &App) -> Vec<Clip> {
+        let filters = self.filter.read(cx).filters();
+        self.library
+            .read(cx)
+            .clips()
+            .iter()
+            .filter(|c| filters.matches(c))
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn clip_count(&self, cx: &App) -> usize {
-        self.library.read(cx).clips().len()
+        self.visible_clips(cx).len()
     }
 
     pub(crate) fn select(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -234,7 +256,7 @@ impl AppView {
         self.selected = next;
         if self.mode == Mode::Fullscreen {
             self.stop_preview(cx);
-            let clip = self.library.read(cx).clip(next).cloned();
+            let clip = self.visible_clips(cx).get(next).cloned();
             if let (Some(fs), Some(clip)) = (&self.fullscreen, clip) {
                 fs.update(cx, |f, cx| f.load(clip, window, cx));
             }
@@ -248,7 +270,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(clip) = self.library.read(cx).clip(idx).cloned() else {
+        let Some(clip) = self.visible_clips(cx).get(idx).cloned() else {
             return;
         };
         self.selected = idx;
@@ -276,7 +298,7 @@ impl AppView {
 
     fn toggle_favorite(&mut self, cx: &mut Context<Self>) {
         let idx = self.selected;
-        let Some(clip) = self.library.read(cx).clip(idx).cloned() else {
+        let Some(clip) = self.visible_clips(cx).get(idx).cloned() else {
             return;
         };
         self.library
@@ -339,6 +361,37 @@ impl AppView {
             .filter(|p| p.path == path)
             .map(|p| p.player.clone())
     }
+
+    fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let search = self.filter.read(cx).search.clone();
+        div()
+            .w(px(460.))
+            .text_base()
+            .child(gpui_component::input::Input::new(&search).large())
+    }
+
+    fn render_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.filter.read(cx).filters().is_active();
+        let filter = self.filter.clone();
+        let clips = self.visible_clips_unfiltered(cx);
+        gpui_component::popover::Popover::new("filters")
+            .overlay_closable(false)
+            .trigger(
+                Button::new("filters")
+                    .ghost()
+                    .large()
+                    .selected(active)
+                    .icon(crate::assets::IconName::Funnel)
+                    .tooltip("Filter"),
+            )
+            .content(move |_, _, cx| crate::ui::filter::panel(&filter, &clips, cx))
+    }
+
+    /// All clips ignoring filters — used to populate the filter popover's tag and
+    /// game choices, so hidden options stay selectable.
+    fn visible_clips_unfiltered(&self, cx: &App) -> Vec<Clip> {
+        self.library.read(cx).clips().to_vec()
+    }
 }
 
 fn lib_cfg_key(cx: &App) -> LibCfgKey {
@@ -353,22 +406,26 @@ fn lib_cfg_key(cx: &App) -> LibCfgKey {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let fullscreen_mode = self.mode == Mode::Fullscreen && !self.settings_open;
+        let grid_mode = !fullscreen_mode && !self.settings_open;
+
         let top_bar = h_flex()
             .w_full()
             .px_3()
             .py_2()
-            .justify_between()
+            .gap_3()
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
                 h_flex()
+                    .flex_1()
                     .gap_2()
                     .items_center()
                     .when(fullscreen_mode, |el| {
                         el.child(
                             Button::new("back-to-grid")
                                 .ghost()
+                                .large()
                                 .icon(IconName::ArrowLeft)
                                 .tooltip("Back to grid")
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -378,12 +435,24 @@ impl Render for AppView {
                     })
                     .child(div().font_semibold().child(crate::meta::APP_DISPLAY_NAME)),
             )
+            .when(grid_mode, |el| {
+                el.child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(self.render_search(cx))
+                        .child(self.render_filter(cx)),
+                )
+            })
             .child(
-                Button::new("toggle-settings")
-                    .ghost()
-                    .icon(IconName::Settings)
-                    .tooltip("Settings")
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_settings(cx))),
+                h_flex().flex_1().justify_end().child(
+                    Button::new("toggle-settings")
+                        .ghost()
+                        .large()
+                        .icon(IconName::Settings)
+                        .tooltip("Settings")
+                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_settings(cx))),
+                ),
             );
 
         let body: AnyElement = if self.settings_open {

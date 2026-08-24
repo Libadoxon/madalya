@@ -15,13 +15,14 @@ use crate::media::player::Player;
 
 pub fn render_grid(
     app: &mut AppView,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> AnyElement {
     let lib_cfg = cx.global::<Config>().library.clone();
     let library = app.library.read(cx);
-    let clips: Vec<Clip> = library.clips().to_vec();
     let scanning = library.scanning();
+    let total = library.clips().len();
+    let clips: Vec<Clip> = app.visible_clips(cx);
 
     if lib_cfg.clips_dir.is_none() {
         return empty_state(
@@ -32,12 +33,20 @@ pub fn render_grid(
         );
     }
     if clips.is_empty() {
-        let msg = if scanning {
-            "Scanning for clips…"
+        let (title, msg) = if total > 0 {
+            (
+                "No matches",
+                "No clips match the current search or filters.",
+            )
+        } else if scanning {
+            ("Library empty", "Scanning for clips…")
         } else {
-            "No video clips found in the configured directory."
+            (
+                "Library empty",
+                "No video clips found in the configured directory.",
+            )
         };
-        return empty_state("Library empty", msg, false, cx);
+        return empty_state(title, msg, false, cx);
     }
 
     let selected = app.selected;
@@ -63,6 +72,16 @@ pub fn render_grid(
         })
         .collect();
 
+    // Center a content-width block whose rows are left-aligned, so left and
+    // right margins stay equal instead of packing everything to one side.
+    const GAP: f32 = 12.0;
+    const SIDE_PAD: f32 = 24.0;
+    let viewport_w = f32::from(window.viewport_size().width);
+    let avail = (viewport_w - 2.0 * SIDE_PAD).max(thumb_px);
+    let tile_span = thumb_px + GAP;
+    let cols = ((avail + GAP) / tile_span).floor().max(1.0);
+    let content_w = cols * tile_span - GAP;
+
     let scroll = app.grid_scroll.clone();
     div()
         .relative()
@@ -75,13 +94,14 @@ pub fn render_grid(
                 .overflow_y_scroll()
                 .track_scroll(&scroll)
                 .child(
-                    h_flex()
-                        .flex_wrap()
-                        .justify_center()
-                        .gap_3()
-                        .p_3()
-                        .pb_16()
-                        .children(tiles),
+                    h_flex().w_full().justify_center().py_3().pb_16().child(
+                        h_flex()
+                            .flex_wrap()
+                            .justify_start()
+                            .gap_3()
+                            .w(px(content_w))
+                            .children(tiles),
+                    ),
                 ),
         )
         .child(

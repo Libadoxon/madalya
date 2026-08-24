@@ -48,10 +48,6 @@ impl Library {
         &self.clips
     }
 
-    pub fn clip(&self, idx: usize) -> Option<&Clip> {
-        self.clips.get(idx)
-    }
-
     pub fn scanning(&self) -> bool {
         self.scanning
     }
