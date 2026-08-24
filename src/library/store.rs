@@ -105,7 +105,7 @@ impl Store {
             "DELETE FROM tags WHERE path = ?1 AND source = 'script'",
             params![p],
         )?;
-        for tag in &clip.tags {
+        for tag in &clip.stags {
             tx.execute(
                 "INSERT OR IGNORE INTO tags (path, tag, source) VALUES (?1, ?2, 'script')",
                 params![p, tag],
@@ -182,7 +182,7 @@ impl Store {
 
     pub fn remove_tag(&self, path: &Path, tag: &str) -> Result<()> {
         self.lock().execute(
-            "DELETE FROM tags WHERE path = ?1 AND tag = ?2",
+            "DELETE FROM tags WHERE path = ?1 AND tag = ?2 AND source = 'user'",
             params![path_str(path), tag],
         )?;
         Ok(())
@@ -193,6 +193,25 @@ impl Store {
             "INSERT INTO track_state (path, idx, volume, muted) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path, idx) DO UPDATE SET volume=excluded.volume, muted=excluded.muted",
             params![path_str(path), st.idx, st.volume, st.muted as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT value FROM app_kv WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn kv_set(&self, key: &str, value: &str) -> Result<()> {
+        self.lock().execute(
+            "INSERT OR REPLACE INTO app_kv (key, value) VALUES (?1, ?2)",
+            params![key, value],
         )?;
         Ok(())
     }
@@ -236,7 +255,8 @@ fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
         title: r.get::<_, Option<String>>(8)?,
         game: r.get::<_, Option<String>>(9)?,
         favorite: r.get::<_, i64>(10)? != 0,
-        tags: Vec::new(),
+        stags: Vec::new(),
+        mtags: Vec::new(),
         meta: Vec::new(),
         track_state: Vec::new(),
         added_at: r.get(11)?,
@@ -248,7 +268,8 @@ fn hydrate(conn: &Connection, clip: &mut Clip) -> Result<()> {
     clip.probe.tracks = load_tracks(conn, &p)?;
     clip.track_state = load_track_state(conn, &p)?;
     clip.meta = load_meta(conn, &p)?;
-    clip.tags = load_tags(conn, &p)?;
+    clip.stags = load_tags(conn, &p, "script")?;
+    clip.mtags = load_tags(conn, &p, "user")?;
     Ok(())
 }
 
@@ -287,10 +308,11 @@ fn load_meta(conn: &Connection, p: &str) -> Result<Vec<(String, String)>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn load_tags(conn: &Connection, p: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT tag FROM tags WHERE path = ?1 ORDER BY tag")?;
+fn load_tags(conn: &Connection, p: &str, source: &str) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT tag FROM tags WHERE path = ?1 AND source = ?2 ORDER BY tag")?;
     Ok(stmt
-        .query_map(params![p], |r| r.get(0))?
+        .query_map(params![p, source], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -352,6 +374,10 @@ CREATE TABLE IF NOT EXISTS steam_cache (
     name       TEXT NOT NULL,
     fetched_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS app_kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 #[cfg(test)]
@@ -395,7 +421,8 @@ mod tests {
             thumb_path: Some(PathBuf::from("/thumbs/a.jpg")),
             title: Some("A".into()),
             game: Some("Dota 2".into()),
-            tags: vec!["clip".into()],
+            stags: vec!["clip".into()],
+            mtags: vec![],
             meta: vec![("kind".into(), "video".into())],
             track_state: vec![],
             added_at: 1,
@@ -412,7 +439,8 @@ mod tests {
         assert_eq!(c.probe.tracks.len(), 2);
         assert_eq!(c.title(), "A");
         assert_eq!(c.game(), Some("Dota 2"));
-        assert_eq!(c.tags, vec!["clip".to_string()]);
+        assert_eq!(c.stags, vec!["clip".to_string()]);
+        assert!(c.mtags.is_empty());
 
         let fp = s.fingerprints().unwrap();
         assert_eq!(fp.get(&PathBuf::from("/clips/a.mkv")), Some(&(100, 2048)));
@@ -441,18 +469,21 @@ mod tests {
         let mut changed = sample();
         changed.mtime = 200;
         changed.title = Some("A2".into());
-        changed.tags = vec!["clip2".into()];
+        changed.stags = vec!["clip2".into()];
         s.upsert_clip(&changed).unwrap();
 
         let c = &s.load_all().unwrap()[0];
         assert!(c.favorite, "favorite preserved across rescan");
-        assert!(c.tags.contains(&"funny".to_string()), "user tag preserved");
         assert!(
-            c.tags.contains(&"clip2".to_string()),
+            c.mtags.contains(&"funny".to_string()),
+            "manual tag preserved"
+        );
+        assert!(
+            c.stags.contains(&"clip2".to_string()),
             "new script tag applied"
         );
         assert!(
-            !c.tags.contains(&"clip".to_string()),
+            !c.stags.contains(&"clip".to_string()),
             "old script tag replaced"
         );
         assert_eq!(c.title(), "A2", "script title replaced");

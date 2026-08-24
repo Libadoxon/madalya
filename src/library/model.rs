@@ -10,7 +10,10 @@ pub struct Clip {
     pub thumb_path: Option<PathBuf>,
     pub title: Option<String>,
     pub game: Option<String>,
-    pub tags: Vec<String>,
+    /// Script-derived tags: replaced wholesale on every rescan.
+    pub stags: Vec<String>,
+    /// User-added tags: preserved across rescans.
+    pub mtags: Vec<String>,
     pub meta: Vec<(String, String)>,
     pub track_state: Vec<TrackState>,
     pub added_at: i64,

@@ -670,7 +670,7 @@ fn render_script_editor(
                     }
                     let p = save_path.clone();
                     config::update(cx, |c| c.library.script_path = Some(p.clone()));
-                    let _ = app.update(cx, |a, cx| a.rescan_library(cx));
+                    let _ = app.update(cx, |a, cx| a.rescan_library(true, cx));
                 }),
         )
 }

@@ -166,9 +166,9 @@ impl Fullscreen {
                     if !tag.is_empty() {
                         let path = this.clip.path.clone();
                         this.library.update(cx, |l, cx| l.add_tag(&path, &tag, cx));
-                        if !this.clip.tags.iter().any(|t| t == &tag) {
-                            this.clip.tags.push(tag);
-                            this.clip.tags.sort();
+                        if !this.clip.mtags.iter().any(|t| t == &tag) {
+                            this.clip.mtags.push(tag);
+                            this.clip.mtags.sort();
                         }
                         this.clear_tag = true;
                         cx.notify();
@@ -203,7 +203,7 @@ impl Fullscreen {
     }
 
     fn remove_tag(&mut self, tag: String, cx: &mut Context<Self>) {
-        self.clip.tags.retain(|t| t != &tag);
+        self.clip.mtags.retain(|t| t != &tag);
         let path = self.clip.path.clone();
         self.library
             .update(cx, |l, cx| l.remove_tag(&path, &tag, cx));
@@ -365,8 +365,8 @@ impl Fullscreen {
     fn render_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let clip = &self.clip;
 
-        let tags = h_flex().w_full().flex_wrap().gap_1().children(
-            clip.tags
+        let mtags = h_flex().w_full().flex_wrap().gap_1().children(
+            clip.mtags
                 .iter()
                 .cloned()
                 .enumerate()
@@ -394,6 +394,25 @@ impl Fullscreen {
                 })
                 .collect::<Vec<_>>(),
         );
+
+        let stags = h_flex().w_full().flex_wrap().gap_1().children(
+            clip.stags
+                .iter()
+                .map(|tag| {
+                    h_flex()
+                        .items_center()
+                        .px_2()
+                        .py(px(2.))
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().muted)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tag.clone())
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let has_stags = !clip.stags.is_empty();
 
         let meta = v_flex().w_full().gap_1().children(
             clip.meta
@@ -446,8 +465,11 @@ impl Fullscreen {
             .child(section_title("Game", cx))
             .child(Input::new(&self.game_input).small())
             .child(section_title("Tags", cx))
-            .child(tags)
+            .child(mtags)
             .child(Input::new(&self.tag_input).small())
+            .when(has_stags, |el| {
+                el.child(section_title("Script tags", cx)).child(stags)
+            })
             .child(section_title("Metadata", cx))
             .child(meta)
             .into_any_element()

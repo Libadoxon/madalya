@@ -18,15 +18,20 @@ const VIDEO_EXTS: &[&str] = &[
     "mp4", "mkv", "mov", "webm", "avi", "m4v", "flv", "wmv", "ts", "mpg", "mpeg",
 ];
 
+const SCRIPT_HASH_KEY: &str = "script_hash";
+
 /// How many clips are probed/thumbnailed/scripted concurrently.
-const CONCURRENCY: usize = 4;
+fn concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
 
 /// Reconcile the store with the clip home: drop entries whose files vanished,
-/// (re)process new or changed files (script re-runs when mtime/size differ), and
-/// stream results into the `Library` entity as they land.
-///
-/// All disk/DB/GStreamer/Rhai work runs on the background executor; the main
-/// thread only applies cheap in-memory updates to the entity.
+/// (re)process new or changed files, and stream results into the `Library`
+/// entity as they land. The metadata script is re-run on every clip when
+/// `force` is set or the script file changed since the last scan.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     library: WeakEntity<Library>,
     clips_dir: PathBuf,
@@ -34,6 +39,7 @@ pub fn run(
     store: Store,
     thumb_px: u32,
     max_depth: u32,
+    force: bool,
     cx: &mut App,
 ) {
     let executor = cx.background_executor().clone();
@@ -42,7 +48,19 @@ pub fn run(
     cx.spawn(async move |cx| {
         let _ = library.update(cx, |l, cx| l.set_scanning(true, cx));
 
-        // Diff disk against the store — off the main thread.
+        let script_hash = script_fingerprint(script_path.as_deref());
+        let script_changed = {
+            let store = store.clone();
+            let hash = script_hash.clone();
+            executor
+                .spawn(async move {
+                    store.kv_get(SCRIPT_HASH_KEY).ok().flatten().as_deref() != Some(hash.as_str())
+                })
+                .await
+        };
+        let force = force || script_changed;
+
+        // Diff disk against the store
         let plan = {
             let store = store.clone();
             let clips_dir = clips_dir.clone();
@@ -57,7 +75,7 @@ pub fn run(
                         .collect();
                     let todo: Vec<(PathBuf, (i64, u64))> = disk
                         .into_iter()
-                        .filter(|(p, fp)| existing.get(p) != Some(fp))
+                        .filter(|(p, fp)| force || existing.get(p) != Some(fp))
                         .collect();
                     (removed, todo)
                 })
@@ -82,37 +100,68 @@ pub fn run(
                 .await
         };
 
-        for chunk in todo.chunks(CONCURRENCY) {
-            let tasks: Vec<_> = chunk
-                .iter()
-                .cloned()
-                .map(|(path, fp)| {
-                    let store = store.clone();
-                    let engine = engine.clone();
-                    let thumbs_dir = thumbs_dir.clone();
-                    executor.spawn(async move {
-                        let clip = build_clip(&path, fp, thumb_px, engine.as_deref(), &thumbs_dir)?;
-                        store.upsert_clip(&clip)?;
-                        Ok::<Clip, anyhow::Error>(
-                            store.load_clip(&clip.path).ok().flatten().unwrap_or(clip),
-                        )
-                    })
-                })
-                .collect();
+        let (jobs_tx, jobs_rx) = smol::channel::unbounded::<(PathBuf, (i64, u64))>();
+        let (results_tx, results_rx) = smol::channel::unbounded::<Clip>();
+        for job in todo {
+            let _ = jobs_tx.send(job).await;
+        }
+        jobs_tx.close();
 
-            for task in tasks {
-                match task.await {
-                    Ok(clip) => {
-                        let _ = library.update(cx, |l, cx| l.apply_upserted(clip, cx));
+        for _ in 0..concurrency() {
+            let jobs_rx = jobs_rx.clone();
+            let results_tx = results_tx.clone();
+            let store = store.clone();
+            let engine = engine.clone();
+            let thumbs_dir = thumbs_dir.clone();
+            executor
+                .spawn(async move {
+                    while let Ok((path, fp)) = jobs_rx.recv().await {
+                        match build_clip(&path, fp, thumb_px, engine.as_deref(), &thumbs_dir)
+                            .and_then(|clip| {
+                                store.upsert_clip(&clip)?;
+                                Ok(store.load_clip(&clip.path).ok().flatten().unwrap_or(clip))
+                            }) {
+                            Ok(clip) => {
+                                let _ = results_tx.send(clip).await;
+                            }
+                            Err(e) => tracing::warn!("skipping {path:?}: {e:#}"),
+                        }
                     }
-                    Err(e) => tracing::warn!("skipping clip: {e:#}"),
-                }
-            }
+                })
+                .detach();
+        }
+        drop(results_tx);
+        drop(jobs_rx);
+
+        while let Ok(clip) = results_rx.recv().await {
+            let _ = library.update(cx, |l, cx| l.apply_upserted(clip, cx));
+        }
+
+        {
+            let store = store.clone();
+            executor
+                .spawn(async move { store.kv_set(SCRIPT_HASH_KEY, &script_hash) })
+                .await
+                .ok();
         }
 
         let _ = library.update(cx, |l, cx| l.set_scanning(false, cx));
     })
     .detach();
+}
+
+fn script_fingerprint(path: Option<&Path>) -> String {
+    let Some(path) = path else {
+        return "none".into();
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            format!("{:016x}", h.finish())
+        }
+        Err(_) => "unreadable".into(),
+    }
 }
 
 fn load_engine(script_path: Option<PathBuf>, store: Store) -> Option<Arc<ScriptEngine>> {
@@ -137,15 +186,19 @@ fn build_clip(
     let probe = media::probe::probe(&uri)?;
 
     let thumb = thumbs_dir.join(format!("{}.jpg", fingerprint_hash(path, mtime)));
-    let thumb_path = match media::thumbnail::generate(&uri, &thumb, thumb_px) {
-        Ok(()) => Some(thumb),
-        Err(e) => {
-            tracing::warn!("thumbnail failed for {path:?}: {e:#}");
-            None
+    let thumb_path = if thumb.exists() {
+        Some(thumb)
+    } else {
+        match media::thumbnail::generate(&uri, &thumb, thumb_px) {
+            Ok(()) => Some(thumb),
+            Err(e) => {
+                tracing::warn!("thumbnail failed for {path:?}: {e:#}");
+                None
+            }
         }
     };
 
-    let (title, game, meta, tags) = match engine {
+    let (title, game, meta, stags) = match engine {
         Some(e) => match e.run(ClipInput {
             path,
             mtime,
@@ -170,7 +223,8 @@ fn build_clip(
         thumb_path,
         title,
         game,
-        tags,
+        stags,
+        mtags: Vec::new(),
         meta,
         track_state: Vec::new(),
         added_at: now_secs(),

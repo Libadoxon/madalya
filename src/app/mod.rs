@@ -69,7 +69,7 @@ impl AppView {
         let lib_sub = cx.observe(&library, |_this, _lib, cx| cx.notify());
 
         let last_lib_cfg = lib_cfg_key(cx);
-        library.update(cx, |l, cx| l.rescan(cx));
+        library.update(cx, |l, cx| l.rescan(false, cx));
 
         Self {
             settings_open: false,
@@ -97,7 +97,7 @@ impl AppView {
             if self.settings_open {
                 self.pending_rescan = true;
             } else {
-                self.library.update(cx, |l, cx| l.rescan(cx));
+                self.library.update(cx, |l, cx| l.rescan(false, cx));
             }
         }
     }
@@ -207,13 +207,13 @@ impl AppView {
         self.settings_open = !self.settings_open;
         if closing && self.pending_rescan {
             self.pending_rescan = false;
-            self.rescan_library(cx);
+            self.rescan_library(false, cx);
         }
         cx.notify();
     }
 
-    pub(crate) fn rescan_library(&mut self, cx: &mut Context<Self>) {
-        self.library.update(cx, |l, cx| l.rescan(cx));
+    pub(crate) fn rescan_library(&mut self, force: bool, cx: &mut Context<Self>) {
+        self.library.update(cx, |l, cx| l.rescan(force, cx));
     }
 
     pub(crate) fn clip_count(&self, cx: &App) -> usize {

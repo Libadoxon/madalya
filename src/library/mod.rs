@@ -56,8 +56,9 @@ impl Library {
         self.scanning
     }
 
-    /// (Re)scan the configured clip home. No-op if no clip home is set.
-    pub fn rescan(&mut self, cx: &mut Context<Self>) {
+    /// (Re)scan the configured clip home. No-op if no clip home is set. When
+    /// `force` is set, the script is re-run on every clip regardless of changes.
+    pub fn rescan(&mut self, force: bool, cx: &mut Context<Self>) {
         let cfg = cx.global::<Config>().library.clone();
         let Some(clips_dir) = cfg.clips_dir.clone() else {
             return;
@@ -69,6 +70,7 @@ impl Library {
             self.store.clone(),
             cfg.thumb_px.max(1),
             cfg.max_scan_depth,
+            force,
             cx,
         );
     }
@@ -102,10 +104,10 @@ impl Library {
     pub fn add_tag(&mut self, path: &Path, tag: &str, cx: &mut Context<Self>) {
         let _ = self.store.add_tag(path, tag);
         if let Some(c) = self.clip_mut(path)
-            && !c.tags.iter().any(|t| t == tag)
+            && !c.mtags.iter().any(|t| t == tag)
         {
-            c.tags.push(tag.to_string());
-            c.tags.sort();
+            c.mtags.push(tag.to_string());
+            c.mtags.sort();
             cx.notify();
         }
     }
@@ -113,7 +115,7 @@ impl Library {
     pub fn remove_tag(&mut self, path: &Path, tag: &str, cx: &mut Context<Self>) {
         let _ = self.store.remove_tag(path, tag);
         if let Some(c) = self.clip_mut(path) {
-            c.tags.retain(|t| t != tag);
+            c.mtags.retain(|t| t != tag);
             cx.notify();
         }
     }
