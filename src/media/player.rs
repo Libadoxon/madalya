@@ -16,6 +16,8 @@ pub struct PlayerOptions {
     pub muted: bool,
     pub looping: bool,
     pub preview_width: Option<u32>,
+    pub start_ms: u64,
+    pub stop_ms: Option<u64>,
 }
 
 enum PlayerMsg {
@@ -34,6 +36,10 @@ pub struct Player {
     looping: bool,
     position_ms: u64,
     duration_ms: u64,
+    start_ms: u64,
+    stop_ms: Option<u64>,
+    pending_start: bool,
+    enforce_stop: bool,
     _tasks: Vec<Task<()>>,
 }
 
@@ -56,9 +62,12 @@ impl Player {
         };
 
         let has_pipeline = pipeline.is_some();
+        // Start paused so the pipeline prerolls; playback (and the seek to the
+        // highlight start) is kicked off once it's ready. Seeking a not-yet-
+        // prerolled pipeline is silently dropped.
         let mut tasks = Vec::new();
         if let Some(pipeline) = &pipeline {
-            let _ = pipeline.set_state(gst::State::Playing);
+            let _ = pipeline.set_state(gst::State::Paused);
 
             tasks.push(cx.spawn(async move |this, cx| {
                 while let Ok(msg) = rx.recv().await {
@@ -92,7 +101,7 @@ impl Player {
                     if this
                         .update(cx, |p, cx| {
                             p.drain_bus();
-                            p.refresh_position();
+                            p.refresh_position(cx);
                             cx.notify();
                         })
                         .is_err()
@@ -114,6 +123,10 @@ impl Player {
             looping: opts.looping,
             position_ms: 0,
             duration_ms: 0,
+            start_ms: opts.start_ms,
+            stop_ms: opts.stop_ms,
+            pending_start: has_pipeline,
+            enforce_stop: opts.stop_ms.is_some(),
             _tasks: tasks,
         }
     }
@@ -153,13 +166,23 @@ impl Player {
 
     pub fn seek_ms(&mut self, ms: u64, cx: &mut Context<Self>) {
         let Some(p) = &self.pipeline else { return };
+        // ACCURATE (not KEY_UNIT): clips with a large GOP may have keyframes only
+        // every few seconds, and KEY_UNIT would snap the seek back to the nearest
+        // one — often frame 0 — so playback always restarted from the beginning.
         let _ = p.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_mseconds(ms),
         );
         self.position_ms = ms;
         self.ended = false;
         cx.notify();
+    }
+
+    /// A seek initiated by the user, which releases the highlight auto-stop so
+    /// they can watch past the marked end.
+    pub fn user_seek(&mut self, ms: u64, cx: &mut Context<Self>) {
+        self.enforce_stop = false;
+        self.seek_ms(ms, cx);
     }
 
     pub fn set_track(&self, idx: u32, volume: f64, muted: bool) {
@@ -177,7 +200,7 @@ impl Player {
 
     fn on_eos(&mut self, cx: &mut Context<Self>) -> bool {
         if self.looping {
-            self.seek_ms(0, cx);
+            self.seek_ms(self.start_ms, cx);
         } else {
             self.playing = false;
             self.ended = true;
@@ -207,15 +230,46 @@ impl Player {
         }
     }
 
-    fn refresh_position(&mut self) {
-        let Some(p) = &self.pipeline else { return };
-        if let Some(pos) = p.query_position::<gst::ClockTime>() {
-            self.position_ms = pos.mseconds();
-        }
+    fn refresh_position(&mut self, cx: &mut Context<Self>) {
+        let (pos, dur, prerolled) = {
+            let Some(p) = &self.pipeline else { return };
+            (
+                p.query_position::<gst::ClockTime>().map(|t| t.mseconds()),
+                p.query_duration::<gst::ClockTime>().map(|t| t.mseconds()),
+                matches!(p.current_state(), gst::State::Paused | gst::State::Playing),
+            )
+        };
         if self.duration_ms == 0
-            && let Some(dur) = p.query_duration::<gst::ClockTime>()
+            && let Some(dur) = dur
         {
-            self.duration_ms = dur.mseconds();
+            self.duration_ms = dur;
+        }
+        // Once prerolled, jump to the highlight start and begin playback.
+        if self.pending_start && prerolled {
+            self.pending_start = false;
+            if self.start_ms > 0 {
+                self.seek_ms(self.start_ms, cx);
+            }
+            self.set_playing(true, cx);
+            return;
+        }
+        if let Some(pos) = pos {
+            self.position_ms = pos;
+        }
+        if self.enforce_stop
+            && self.playing
+            && let Some(stop) = self.stop_ms
+            && self.position_ms >= stop
+        {
+            if self.looping {
+                // Previews loop the marked segment.
+                self.seek_ms(self.start_ms, cx);
+            } else {
+                // Fullscreen pauses at the mark; a further play continues past it.
+                self.enforce_stop = false;
+                self.position_ms = stop;
+                self.set_playing(false, cx);
+            }
         }
     }
 }
@@ -423,6 +477,7 @@ mod tests {
                 muted: true,
                 looping: false,
                 preview_width: None,
+                ..Default::default()
             },
             Vec::new(),
             vols,
@@ -468,6 +523,7 @@ mod tests {
                 muted: false,
                 looping: false,
                 preview_width: None,
+                ..Default::default()
             },
             Vec::new(),
             vols.clone(),

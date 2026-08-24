@@ -88,6 +88,21 @@ impl Library {
         }
     }
 
+    pub fn set_marks(
+        &mut self,
+        path: &Path,
+        start: Option<u64>,
+        end: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.store.set_marks(path, start, end);
+        if let Some(c) = self.clip_mut(path) {
+            c.mark_start = start;
+            c.mark_end = end;
+            cx.notify();
+        }
+    }
+
     pub fn set_game(&mut self, path: &Path, game: Option<&str>, cx: &mut Context<Self>) {
         let _ = self.store.set_game(path, game);
         let normalized = game.map(str::trim).filter(|s| !s.is_empty());

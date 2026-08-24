@@ -223,6 +223,8 @@ fn build_clip(
         thumb_path,
         title,
         game,
+        mark_start: None,
+        mark_end: None,
         stags,
         mtags: Vec::new(),
         meta,

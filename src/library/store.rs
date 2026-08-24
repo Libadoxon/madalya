@@ -172,6 +172,18 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_marks(&self, path: &Path, start: Option<u64>, end: Option<u64>) -> Result<()> {
+        self.lock().execute(
+            "UPDATE clips SET mark_start = ?2, mark_end = ?3 WHERE path = ?1",
+            params![
+                path_str(path),
+                start.map(|v| v as i64),
+                end.map(|v| v as i64)
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn add_tag(&self, path: &Path, tag: &str) -> Result<()> {
         self.lock().execute(
             "INSERT OR IGNORE INTO tags (path, tag, source) VALUES (?1, ?2, 'user')",
@@ -236,7 +248,7 @@ impl Store {
     }
 }
 
-const CLIP_COLS: &str = "path, mtime, size, duration_ms, width, height, vcodec, thumb_path, title, game, favorite, added_at";
+const CLIP_COLS: &str = "path, mtime, size, duration_ms, width, height, vcodec, thumb_path, title, game, mark_start, mark_end, favorite, added_at";
 
 fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
     Ok(Clip {
@@ -254,12 +266,14 @@ fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
         thumb_path: r.get::<_, Option<String>>(7)?.map(PathBuf::from),
         title: r.get::<_, Option<String>>(8)?,
         game: r.get::<_, Option<String>>(9)?,
-        favorite: r.get::<_, i64>(10)? != 0,
+        mark_start: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+        mark_end: r.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+        favorite: r.get::<_, i64>(12)? != 0,
         stags: Vec::new(),
         mtags: Vec::new(),
         meta: Vec::new(),
         track_state: Vec::new(),
-        added_at: r.get(11)?,
+        added_at: r.get(13)?,
     })
 }
 
@@ -339,6 +353,8 @@ CREATE TABLE IF NOT EXISTS clips (
     thumb_path  TEXT,
     title       TEXT,
     game        TEXT,
+    mark_start  INTEGER,
+    mark_end    INTEGER,
     favorite    INTEGER NOT NULL DEFAULT 0,
     added_at    INTEGER NOT NULL
 );
@@ -421,6 +437,8 @@ mod tests {
             thumb_path: Some(PathBuf::from("/thumbs/a.jpg")),
             title: Some("A".into()),
             game: Some("Dota 2".into()),
+            mark_start: None,
+            mark_end: None,
             stags: vec!["clip".into()],
             mtags: vec![],
             meta: vec![("kind".into(), "video".into())],
@@ -455,6 +473,7 @@ mod tests {
         // User edits.
         s.set_favorite(&path, true).unwrap();
         s.add_tag(&path, "funny").unwrap();
+        s.set_marks(&path, Some(1000), Some(4000)).unwrap();
         s.set_track_state(
             &path,
             TrackState {
@@ -474,6 +493,11 @@ mod tests {
 
         let c = &s.load_all().unwrap()[0];
         assert!(c.favorite, "favorite preserved across rescan");
+        assert_eq!(
+            c.marks(),
+            Some((1000, 4000)),
+            "marks preserved across rescan"
+        );
         assert!(
             c.mtags.contains(&"funny".to_string()),
             "manual tag preserved"

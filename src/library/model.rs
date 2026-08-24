@@ -10,6 +10,10 @@ pub struct Clip {
     pub thumb_path: Option<PathBuf>,
     pub title: Option<String>,
     pub game: Option<String>,
+    /// User-marked "most relevant" range, in ms. Playback starts at `mark_start`
+    /// and stops at `mark_end` when both are set.
+    pub mark_start: Option<u64>,
+    pub mark_end: Option<u64>,
     /// Script-derived tags: replaced wholesale on every rescan.
     pub stags: Vec<String>,
     /// User-added tags: preserved across rescans.
@@ -41,6 +45,15 @@ impl Clip {
 
     pub fn game(&self) -> Option<&str> {
         self.game.as_deref().filter(|s| !s.is_empty())
+    }
+
+    /// The complete highlight range (start, end) when both markers are set and
+    /// ordered; otherwise `None`.
+    pub fn marks(&self) -> Option<(u64, u64)> {
+        match (self.mark_start, self.mark_end) {
+            (Some(a), Some(b)) if b > a => Some((a, b)),
+            _ => None,
+        }
     }
 
     pub fn state_for(&self, idx: u32) -> TrackState {

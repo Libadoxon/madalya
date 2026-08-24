@@ -339,10 +339,20 @@ impl AppView {
         let Ok(uri) = crate::media::path_to_uri(&path) else {
             return;
         };
+        let clip = self
+            .library
+            .read(cx)
+            .clips()
+            .iter()
+            .find(|c| c.path == path);
+        let start_ms = clip.and_then(|c| c.mark_start).unwrap_or(0);
+        let stop_ms = clip.and_then(|c| c.marks()).map(|(_, end)| end);
         let opts = PlayerOptions {
             muted: true,
             looping: true,
             preview_width: Some(PREVIEW_WIDTH),
+            start_ms,
+            stop_ms,
         };
         let player = cx.new(|cx| Player::new(&uri, opts, Vec::new(), cx));
         self.preview = Some(PreviewState { path, player });

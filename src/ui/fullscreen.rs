@@ -1,7 +1,10 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, ElementExt as _, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
@@ -23,7 +26,6 @@ pub struct Fullscreen {
     app: WeakEntity<AppView>,
     clip: Clip,
     player: Entity<Player>,
-    scrubber: Entity<SliderState>,
     dragging: bool,
     volumes: Vec<Entity<SliderState>>,
     tracks: Vec<TrackState>,
@@ -32,6 +34,10 @@ pub struct Fullscreen {
     clear_tag: bool,
     title_input: Entity<InputState>,
     game_input: Entity<InputState>,
+    mark_start_input: Entity<InputState>,
+    mark_end_input: Entity<InputState>,
+    next_mark_is_start: bool,
+    timeline_bounds: Rc<Cell<Bounds<Pixels>>>,
     sync_fields: bool,
     _subs: Vec<Subscription>,
 }
@@ -47,13 +53,14 @@ impl Fullscreen {
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag…"));
         let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Title…"));
         let game_input = cx.new(|cx| InputState::new(window, cx).placeholder("Game…"));
-        let (player, scrubber, volumes, tracks) = build_media(&clip, cx);
+        let mark_start_input = cx.new(|cx| InputState::new(window, cx).placeholder("m:ss"));
+        let mark_end_input = cx.new(|cx| InputState::new(window, cx).placeholder("m:ss"));
+        let (player, volumes, tracks) = build_media(&clip, cx);
         let mut this = Self {
             library,
             app,
             clip,
             player,
-            scrubber,
             dragging: false,
             volumes,
             tracks,
@@ -62,6 +69,10 @@ impl Fullscreen {
             clear_tag: false,
             title_input,
             game_input,
+            mark_start_input,
+            mark_end_input,
+            next_mark_is_start: true,
+            timeline_bounds: Rc::new(Cell::new(Bounds::default())),
             sync_fields: true,
             _subs: Vec::new(),
         };
@@ -70,14 +81,14 @@ impl Fullscreen {
     }
 
     pub fn load(&mut self, clip: Clip, _window: &mut Window, cx: &mut Context<Self>) {
-        let (player, scrubber, volumes, tracks) = build_media(&clip, cx);
+        let (player, volumes, tracks) = build_media(&clip, cx);
         self.clip = clip;
         self.player = player;
-        self.scrubber = scrubber;
         self.volumes = volumes;
         self.tracks = tracks;
         self.dragging = false;
         self.master_muted = false;
+        self.next_mark_is_start = true;
         self._subs.clear();
         self.clear_tag = true;
         self.sync_fields = true;
@@ -97,18 +108,6 @@ impl Fullscreen {
 
     fn wire(&mut self, cx: &mut Context<Self>) {
         let mut subs = vec![cx.observe(&self.player, |_, _, cx| cx.notify())];
-
-        subs.push(
-            cx.subscribe(&self.scrubber, |this, slider, ev, cx| match ev {
-                SliderEvent::Change(_) => this.dragging = true,
-                SliderEvent::Release(_) => {
-                    let secs = slider.read(cx).value().start();
-                    this.player
-                        .update(cx, |p, cx| p.seek_ms((secs * 1000.0) as u64, cx));
-                    this.dragging = false;
-                }
-            }),
-        );
 
         for (i, vol) in self.volumes.iter().enumerate() {
             subs.push(cx.subscribe(vol, move |this, slider, ev, cx| {
@@ -155,6 +154,25 @@ impl Fullscreen {
                         this.clip.game = game;
                         cx.notify();
                     }
+                }
+            }),
+        );
+
+        subs.push(cx.subscribe(
+            &self.mark_start_input,
+            |this, input, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let ms = parse_time(&input.read(cx).value());
+                    this.set_mark(true, ms, cx);
+                }
+            },
+        ));
+
+        subs.push(
+            cx.subscribe(&self.mark_end_input, |this, input, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let ms = parse_time(&input.read(cx).value());
+                    this.set_mark(false, ms, cx);
                 }
             }),
         );
@@ -210,6 +228,57 @@ impl Fullscreen {
         cx.notify();
     }
 
+    /// Ctrl+click on the timeline: first click sets the start (and clears the
+    /// end), the next sets the end; markers are re-ordered if crossed.
+    fn ctrl_mark(&mut self, ms: u64, cx: &mut Context<Self>) {
+        if self.next_mark_is_start {
+            self.clip.mark_start = Some(ms);
+            self.clip.mark_end = None;
+            self.next_mark_is_start = false;
+        } else {
+            let start = self.clip.mark_start.unwrap_or(0);
+            if ms >= start {
+                self.clip.mark_end = Some(ms);
+            } else {
+                self.clip.mark_end = Some(start);
+                self.clip.mark_start = Some(ms);
+            }
+            self.next_mark_is_start = true;
+        }
+        self.persist_marks(cx);
+    }
+
+    fn set_mark(&mut self, is_start: bool, ms: Option<u64>, cx: &mut Context<Self>) {
+        if is_start {
+            self.clip.mark_start = ms;
+        } else {
+            self.clip.mark_end = ms;
+        }
+        if let (Some(a), Some(b)) = (self.clip.mark_start, self.clip.mark_end)
+            && a > b
+        {
+            self.clip.mark_start = Some(b);
+            self.clip.mark_end = Some(a);
+        }
+        self.persist_marks(cx);
+    }
+
+    fn clear_marks(&mut self, cx: &mut Context<Self>) {
+        self.clip.mark_start = None;
+        self.clip.mark_end = None;
+        self.next_mark_is_start = true;
+        self.persist_marks(cx);
+    }
+
+    fn persist_marks(&mut self, cx: &mut Context<Self>) {
+        let path = self.clip.path.clone();
+        let (start, end) = (self.clip.mark_start, self.clip.mark_end);
+        self.library
+            .update(cx, |l, cx| l.set_marks(&path, start, end, cx));
+        self.sync_fields = true;
+        cx.notify();
+    }
+
     fn app_dispatch(&self, action: Action, window: &mut Window, cx: &mut App) {
         let app = self.app.clone();
         window.defer(cx, move |window, cx| {
@@ -233,21 +302,17 @@ impl Render for Fullscreen {
             let game = self.clip.game().unwrap_or_default().to_string();
             self.game_input
                 .update(cx, |s, cx| s.set_value(game, window, cx));
+            let start = self.clip.mark_start.map(fmt_time).unwrap_or_default();
+            self.mark_start_input
+                .update(cx, |s, cx| s.set_value(start, window, cx));
+            let end = self.clip.mark_end.map(fmt_time).unwrap_or_default();
+            self.mark_end_input
+                .update(cx, |s, cx| s.set_value(end, window, cx));
         }
 
         let position = self.player.read(cx).position_ms();
-        let duration = self
-            .player
-            .read(cx)
-            .duration_ms()
-            .max(self.clip.probe.duration_ms);
+        let duration = self.duration(cx);
         let playing = self.player.read(cx).playing();
-
-        if !self.dragging {
-            self.scrubber.update(cx, |s, cx| {
-                s.set_value(position as f32 / 1000.0, window, cx)
-            });
-        }
 
         let video = div()
             .flex_1()
@@ -339,7 +404,7 @@ impl Fullscreen {
                     })),
             )
             .child(div().text_sm().child(fmt_time(position)))
-            .child(div().flex_1().child(Slider::new(&self.scrubber)))
+            .child(self.render_timeline(position, duration, cx))
             .child(div().text_sm().child(fmt_time(duration)))
             .child(audio)
             .child(
@@ -359,6 +424,127 @@ impl Fullscreen {
                     .tooltip("Favorite")
                     .on_click(cx.listener(|this, _, _w, cx| this.toggle_favorite(cx))),
             )
+            .into_any_element()
+    }
+
+    fn duration(&self, cx: &App) -> u64 {
+        let d = self.player.read(cx).duration_ms();
+        if d > 0 {
+            d
+        } else {
+            self.clip.probe.duration_ms
+        }
+    }
+
+    fn timeline_ms(&self, x: Pixels, cx: &App) -> Option<u64> {
+        let b = self.timeline_bounds.get();
+        let w = f32::from(b.size.width);
+        if w <= 0.0 {
+            return None;
+        }
+        let frac = (f32::from(x - b.left()) / w).clamp(0.0, 1.0);
+        Some((frac as f64 * self.duration(cx) as f64) as u64)
+    }
+
+    fn render_timeline(&self, position: u64, duration: u64, cx: &mut Context<Self>) -> AnyElement {
+        let dur = duration.max(1);
+        let frac = |ms: u64| (ms as f32 / dur as f32).clamp(0.0, 1.0);
+        let pos = frac(position);
+        let start_frac = self.clip.mark_start.map(frac);
+        let end_frac = self.clip.mark_end.map(frac);
+        let accent = cx.theme().accent;
+        let bounds_cell = self.timeline_bounds.clone();
+
+        let line = move |at: f32, color: Hsla| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(relative(at))
+                .w(px(2.))
+                .bg(color)
+        };
+
+        let track = div()
+            .relative()
+            .w_full()
+            .h(px(6.))
+            .rounded_full()
+            .bg(cx.theme().secondary)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(relative(pos))
+                    .rounded_full()
+                    .bg(cx.theme().primary),
+            )
+            .when_some(
+                start_frac.zip(end_frac).filter(|(a, b)| b > a),
+                |el, (a, b)| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(relative(a))
+                            .w(relative(b - a))
+                            .rounded_full()
+                            .bg(accent.opacity(0.45)),
+                    )
+                },
+            );
+
+        div()
+            .id("timeline")
+            .flex_1()
+            .h_6()
+            .relative()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+                    let Some(ms) = this.timeline_ms(ev.position.x, cx) else {
+                        return;
+                    };
+                    if ev.modifiers.control {
+                        this.ctrl_mark(ms, cx);
+                    } else {
+                        this.dragging = true;
+                        this.player.update(cx, |p, cx| p.user_seek(ms, cx));
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
+                if this.dragging
+                    && ev.pressed_button == Some(MouseButton::Left)
+                    && let Some(ms) = this.timeline_ms(ev.position.x, cx)
+                {
+                    this.player.update(cx, |p, cx| p.user_seek(ms, cx));
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.dragging = false;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, _cx| {
+                    this.dragging = false;
+                }),
+            )
+            .child(track)
+            .when_some(start_frac, |el, a| el.child(line(a, accent)))
+            .when_some(end_frac, |el, b| el.child(line(b, accent)))
+            .child(line(pos, cx.theme().foreground))
+            .on_prepaint(move |b, _, _| bounds_cell.set(b))
             .into_any_element()
     }
 
@@ -464,6 +650,37 @@ impl Fullscreen {
             .child(Input::new(&self.title_input).small())
             .child(section_title("Game", cx))
             .child(Input::new(&self.game_input).small())
+            .child(section_title("Highlight", cx))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Ctrl+click the timeline to set start, then end."),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.mark_start_input).small()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.mark_end_input).small()),
+                    )
+                    .child(
+                        Button::new("clear-marks")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("Clear highlight")
+                            .on_click(cx.listener(|this, _, _w, cx| this.clear_marks(cx))),
+                    ),
+            )
             .child(section_title("Tags", cx))
             .child(mtags)
             .child(Input::new(&self.tag_input).small())
@@ -524,12 +741,7 @@ fn section_title(label: &str, cx: &App) -> impl IntoElement {
 fn build_media(
     clip: &Clip,
     cx: &mut Context<Fullscreen>,
-) -> (
-    Entity<Player>,
-    Entity<SliderState>,
-    Vec<Entity<SliderState>>,
-    Vec<TrackState>,
-) {
+) -> (Entity<Player>, Vec<Entity<SliderState>>, Vec<TrackState>) {
     let uri = media::path_to_uri(&clip.path).unwrap_or_default();
     let states: Vec<TrackState> = clip
         .probe
@@ -538,6 +750,8 @@ fn build_media(
         .map(|t| clip.state_for(t.idx))
         .collect();
     let states_for_player = states.clone();
+    let start_ms = clip.mark_start.unwrap_or(0);
+    let stop_ms = clip.marks().map(|(_, end)| end);
     let player = cx.new(|cx| {
         Player::new(
             &uri,
@@ -545,19 +759,12 @@ fn build_media(
                 muted: false,
                 looping: false,
                 preview_width: None,
+                start_ms,
+                stop_ms,
             },
             states_for_player,
             cx,
         )
-    });
-
-    let dur = (clip.probe.duration_ms as f32 / 1000.0).max(1.0);
-    let scrubber = cx.new(|_| {
-        SliderState::new()
-            .min(0.0)
-            .max(dur)
-            .step(0.1)
-            .default_value(0.0)
     });
 
     let volumes = states
@@ -574,7 +781,7 @@ fn build_media(
         })
         .collect();
 
-    (player, scrubber, volumes, states)
+    (player, volumes, states)
 }
 
 fn fmt_time(ms: u64) -> String {
@@ -585,4 +792,17 @@ fn fmt_time(ms: u64) -> String {
     } else {
         format!("{m}:{s:02}")
     }
+}
+
+/// Parse "m:ss", "h:mm:ss", or plain seconds into milliseconds. Empty -> None.
+fn parse_time(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut secs = 0f64;
+    for part in s.split(':') {
+        secs = secs * 60.0 + part.trim().parse::<f64>().ok()?;
+    }
+    Some((secs * 1000.0) as u64)
 }
