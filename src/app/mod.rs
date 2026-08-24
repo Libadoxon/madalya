@@ -203,6 +203,11 @@ impl AppView {
                     fs.update(cx, |f, cx| f.toggle_play(cx));
                 }
             }
+            Action::Replay => {
+                if let Some(fs) = &self.fullscreen {
+                    fs.update(cx, |f, cx| f.replay(cx));
+                }
+            }
             Action::ToggleMute => {
                 if let Some(fs) = &self.fullscreen {
                     fs.update(cx, |f, cx| f.toggle_mute(cx));

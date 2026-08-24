@@ -45,6 +45,7 @@ impl AssetSource for Assets {
 pub enum IconName {
     CircleDot,
     Funnel,
+    RotateCcw,
 }
 
 impl IconNamed for IconName {
@@ -52,6 +53,7 @@ impl IconNamed for IconName {
         match self {
             IconName::CircleDot => "icons/circle-dot.svg",
             IconName::Funnel => "icons/funnel.svg",
+            IconName::RotateCcw => "icons/rotate-ccw.svg",
         }
         .into()
     }

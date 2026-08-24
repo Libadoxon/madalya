@@ -34,6 +34,8 @@ pub enum Action {
     PrevClip,
     #[strum(message = "Play / Pause")]
     PlayPause,
+    #[strum(message = "Replay")]
+    Replay,
     #[strum(message = "Toggle Mute")]
     ToggleMute,
     #[strum(message = "Toggle Favorite")]
@@ -373,6 +375,10 @@ impl Default for Keybinds {
                 Binding {
                     action: Action::PlayPause,
                     bind: key("space"),
+                },
+                Binding {
+                    action: Action::Replay,
+                    bind: key("r"),
                 },
                 Binding {
                     action: Action::ToggleMute,

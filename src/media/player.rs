@@ -185,6 +185,17 @@ impl Player {
         self.seek_ms(ms, cx);
     }
 
+    pub fn replay(&mut self, cx: &mut Context<Self>) {
+        self.enforce_stop = self.stop_ms.is_some();
+        self.seek_ms(self.start_ms, cx);
+        self.set_playing(true, cx);
+    }
+
+    pub fn set_segment(&mut self, start_ms: u64, stop_ms: Option<u64>) {
+        self.start_ms = start_ms;
+        self.stop_ms = stop_ms;
+    }
+
     pub fn set_track(&self, idx: u32, volume: f64, muted: bool) {
         if let Some(vol) = self.volumes.lock().unwrap().get(idx as usize) {
             vol.set_property("volume", volume);

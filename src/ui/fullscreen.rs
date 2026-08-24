@@ -100,6 +100,10 @@ impl Fullscreen {
         self.player.update(cx, |p, cx| p.toggle_play(cx));
     }
 
+    pub fn replay(&mut self, cx: &mut Context<Self>) {
+        self.player.update(cx, |p, cx| p.replay(cx));
+    }
+
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         self.master_muted = !self.master_muted;
         self.player.read(cx).set_all_muted(self.master_muted);
@@ -275,6 +279,10 @@ impl Fullscreen {
         let (start, end) = (self.clip.mark_start, self.clip.mark_end);
         self.library
             .update(cx, |l, cx| l.set_marks(&path, start, end, cx));
+        let start_ms = self.clip.mark_start.unwrap_or(0);
+        let stop_ms = self.clip.marks().map(|(_, e)| e);
+        self.player
+            .update(cx, |p, _| p.set_segment(start_ms, stop_ms));
         self.sync_fields = true;
         cx.notify();
     }
@@ -393,6 +401,13 @@ impl Fullscreen {
                     .ghost()
                     .icon(play_icon)
                     .on_click(cx.listener(|this, _, _w, cx| this.toggle_play(cx))),
+            )
+            .child(
+                Button::new("replay")
+                    .ghost()
+                    .icon(crate::assets::IconName::RotateCcw)
+                    .tooltip("Replay")
+                    .on_click(cx.listener(|this, _, _w, cx| this.replay(cx))),
             )
             .child(
                 Button::new("next")
