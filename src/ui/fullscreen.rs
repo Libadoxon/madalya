@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, ElementExt as _, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, ElementExt as _, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
@@ -27,9 +27,15 @@ pub struct Fullscreen {
     clip: Clip,
     player: Entity<Player>,
     dragging: bool,
+    scrub: Option<u64>,
     volumes: Vec<Entity<SliderState>>,
     tracks: Vec<TrackState>,
+    master_slider: Entity<SliderState>,
     master_muted: bool,
+    wants_playing: bool,
+    preparing: bool,
+    audio_gen: u64,
+    audio_task: Option<Task<()>>,
     tag_input: Entity<InputState>,
     clear_tag: bool,
     title_input: Entity<InputState>,
@@ -55,16 +61,29 @@ impl Fullscreen {
         let game_input = cx.new(|cx| InputState::new(window, cx).placeholder("Game…"));
         let mark_start_input = cx.new(|cx| InputState::new(window, cx).placeholder("m:ss"));
         let mark_end_input = cx.new(|cx| InputState::new(window, cx).placeholder("m:ss"));
-        let (player, volumes, tracks) = build_media(&clip, cx);
+        let master_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(2.0)
+                .step(0.01)
+                .default_value(1.0)
+        });
+        let media = build_media(&clip, cx);
         let mut this = Self {
             library,
             app,
             clip,
-            player,
+            player: media.player,
             dragging: false,
-            volumes,
-            tracks,
+            scrub: None,
+            volumes: media.volumes,
+            tracks: media.tracks,
+            master_slider,
             master_muted: false,
+            wants_playing: true,
+            preparing: media.preparing,
+            audio_gen: 0,
+            audio_task: None,
             tag_input,
             clear_tag: false,
             title_input,
@@ -77,30 +96,49 @@ impl Fullscreen {
             _subs: Vec::new(),
         };
         this.wire(cx);
+        if this.preparing {
+            this.prepare_audio(cx);
+        }
         this
     }
 
     pub fn load(&mut self, clip: Clip, _window: &mut Window, cx: &mut Context<Self>) {
-        let (player, volumes, tracks) = build_media(&clip, cx);
+        let media = build_media(&clip, cx);
         self.clip = clip;
-        self.player = player;
-        self.volumes = volumes;
-        self.tracks = tracks;
+        self.player = media.player;
+        self.volumes = media.volumes;
+        self.tracks = media.tracks;
+        self.preparing = media.preparing;
+        self.audio_task = None;
+        self.wants_playing = true;
         self.dragging = false;
+        self.scrub = None;
         self.master_muted = false;
         self.next_mark_is_start = true;
         self._subs.clear();
         self.clear_tag = true;
         self.sync_fields = true;
         self.wire(cx);
+        if self.preparing {
+            self.prepare_audio(cx);
+        }
         cx.notify();
     }
 
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        if self.preparing {
+            return;
+        }
         self.player.update(cx, |p, cx| p.toggle_play(cx));
+        self.wants_playing = self.player.read(cx).playing();
     }
 
     pub fn replay(&mut self, cx: &mut Context<Self>) {
+        self.wants_playing = true;
+        if self.preparing {
+            cx.notify();
+            return;
+        }
         self.player.update(cx, |p, cx| p.replay(cx));
     }
 
@@ -110,8 +148,93 @@ impl Fullscreen {
         cx.notify();
     }
 
+    fn prepare_audio(&mut self, cx: &mut Context<Self>) {
+        if self.clip.probe.tracks.is_empty() {
+            self.preparing = false;
+            return;
+        }
+        let dest = media::mix::cache_path(&self.clip.path, self.clip.mtime, &self.tracks);
+        self.audio_gen += 1;
+        let generation = self.audio_gen;
+        self.preparing = true;
+        self.player.update(cx, |p, cx| p.set_playing(false, cx));
+        cx.notify();
+
+        if dest.exists() {
+            self.on_audio_ready(generation, dest, cx);
+            return;
+        }
+
+        let uri = media::path_to_uri(&self.clip.path).unwrap_or_default();
+        let states = self.tracks.clone();
+        let executor = cx.background_executor().clone();
+        let dest_for_task = dest.clone();
+        self.audio_task = Some(cx.spawn(async move |this, cx| {
+            let result = executor
+                .spawn(async move { media::mix::render_mix(&uri, &states, &dest_for_task) })
+                .await;
+            match result {
+                Ok(()) => {
+                    let _ = this.update(cx, |this, cx| this.on_audio_ready(generation, dest, cx));
+                }
+                Err(e) => {
+                    tracing::warn!("audio mix render failed: {e:#}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.preparing = false;
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+    }
+
+    fn on_audio_ready(
+        &mut self,
+        generation: u64,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.audio_gen {
+            return;
+        }
+        let pos = self.player.read(cx).position_ms();
+        let uri = media::path_to_uri(&self.clip.path).unwrap_or_default();
+        let start_ms = self.clip.mark_start.unwrap_or(0);
+        let stop_ms = self.clip.marks().map(|(_, end)| end);
+        self.player = cx.new(|cx| {
+            Player::new(
+                &uri,
+                PlayerOptions {
+                    muted: false,
+                    looping: false,
+                    preview_width: None,
+                    start_ms,
+                    stop_ms,
+                    audio_path: Some(path),
+                    resume_ms: Some(pos),
+                    start_paused: !self.wants_playing,
+                },
+                cx,
+            )
+        });
+        let vol = self.master_slider.read(cx).value().start() as f64;
+        self.player.read(cx).set_master_volume(vol);
+        self.player.read(cx).set_all_muted(self.master_muted);
+        self.preparing = false;
+        self.wire(cx);
+        cx.notify();
+    }
+
     fn wire(&mut self, cx: &mut Context<Self>) {
         let mut subs = vec![cx.observe(&self.player, |_, _, cx| cx.notify())];
+
+        subs.push(cx.subscribe(
+            &self.master_slider,
+            |this, slider, _ev: &SliderEvent, cx| {
+                let v = slider.read(cx).value().start() as f64;
+                this.player.read(cx).set_master_volume(v);
+            },
+        ));
 
         for (i, vol) in self.volumes.iter().enumerate() {
             subs.push(cx.subscribe(vol, move |this, slider, ev, cx| {
@@ -120,12 +243,12 @@ impl Fullscreen {
                     return;
                 };
                 st.volume = v;
-                let st = *st;
-                this.player.read(cx).set_track(st.idx, st.volume, st.muted);
                 if matches!(ev, SliderEvent::Release(_)) {
+                    let st = *st;
                     let path = this.clip.path.clone();
                     this.library
                         .update(cx, |l, cx| l.set_track_state(&path, st, cx));
+                    this.prepare_audio(cx);
                 }
             }));
         }
@@ -208,10 +331,10 @@ impl Fullscreen {
         };
         st.muted = !enabled;
         let st = *st;
-        self.player.read(cx).set_track(st.idx, st.volume, st.muted);
         let path = self.clip.path.clone();
         self.library
             .update(cx, |l, cx| l.set_track_state(&path, st, cx));
+        self.prepare_audio(cx);
         cx.notify();
     }
 
@@ -318,7 +441,7 @@ impl Render for Fullscreen {
                 .update(cx, |s, cx| s.set_value(end, window, cx));
         }
 
-        let position = self.player.read(cx).position_ms();
+        let position = self.scrub.unwrap_or(self.player.read(cx).position_ms());
         let duration = self.duration(cx);
         let playing = self.player.read(cx).playing();
 
@@ -326,7 +449,33 @@ impl Render for Fullscreen {
             .flex_1()
             .min_h(px(0.))
             .bg(rgb(0x000000))
-            .child(self.player.clone());
+            .relative()
+            .child(self.player.clone())
+            .when(self.preparing, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .bg(rgb(0x000000))
+                        .opacity(0.45)
+                        .flex()
+                        .items_end()
+                        .justify_center()
+                        .child(
+                            div()
+                                .mb_4()
+                                .px_3()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .bg(cx.theme().background.opacity(0.7))
+                                .text_sm()
+                                .child("Preparing audio…"),
+                        ),
+                )
+            });
 
         let transport = self.render_transport(position, duration, playing, cx);
         let panel = self.render_panel(cx);
@@ -400,6 +549,7 @@ impl Fullscreen {
                 Button::new("play")
                     .ghost()
                     .icon(play_icon)
+                    .disabled(self.preparing)
                     .on_click(cx.listener(|this, _, _w, cx| this.toggle_play(cx))),
             )
             .child(
@@ -407,6 +557,7 @@ impl Fullscreen {
                     .ghost()
                     .icon(crate::assets::IconName::RotateCcw)
                     .tooltip("Replay")
+                    .disabled(self.preparing)
                     .on_click(cx.listener(|this, _, _w, cx| this.replay(cx))),
             )
             .child(
@@ -425,9 +576,17 @@ impl Fullscreen {
             .child(
                 Button::new("mute")
                     .ghost()
-                    .label(if self.master_muted { "Unmute" } else { "Mute" })
+                    .icon(if self.master_muted {
+                        crate::assets::IconName::VolumeX
+                    } else {
+                        crate::assets::IconName::Volume2
+                    })
+                    .tooltip(if self.master_muted { "Unmute" } else { "Mute" })
                     .on_click(cx.listener(|this, _, _w, cx| this.toggle_mute(cx))),
             )
+            .child(div().w(px(96.)).child(
+                Slider::new(&self.master_slider).disabled(self.preparing || self.master_muted),
+            ))
             .child(
                 Button::new("fav")
                     .ghost()
@@ -443,12 +602,22 @@ impl Fullscreen {
     }
 
     fn duration(&self, cx: &App) -> u64 {
-        let d = self.player.read(cx).duration_ms();
-        if d > 0 {
-            d
-        } else {
+        if self.clip.probe.duration_ms > 0 {
             self.clip.probe.duration_ms
+        } else {
+            self.player.read(cx).duration_ms()
         }
+    }
+
+    fn end_scrub(&mut self, cx: &mut Context<Self>) {
+        if !self.dragging {
+            return;
+        }
+        self.dragging = false;
+        if let Some(ms) = self.scrub.take() {
+            self.player.update(cx, |p, cx| p.user_seek(ms, cx));
+        }
+        cx.notify();
     }
 
     fn timeline_ms(&self, x: Pixels, cx: &App) -> Option<u64> {
@@ -530,6 +699,7 @@ impl Fullscreen {
                         this.ctrl_mark(ms, cx);
                     } else {
                         this.dragging = true;
+                        this.scrub = Some(ms);
                         this.player.update(cx, |p, cx| p.user_seek(ms, cx));
                     }
                 }),
@@ -539,21 +709,17 @@ impl Fullscreen {
                     && ev.pressed_button == Some(MouseButton::Left)
                     && let Some(ms) = this.timeline_ms(ev.position.x, cx)
                 {
-                    this.player.update(cx, |p, cx| p.user_seek(ms, cx));
+                    this.scrub = Some(ms);
+                    cx.notify();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    this.dragging = false;
-                    cx.notify();
-                }),
+                cx.listener(|this, _, _window, cx| this.end_scrub(cx)),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, _cx| {
-                    this.dragging = false;
-                }),
+                cx.listener(|this, _, _window, cx| this.end_scrub(cx)),
             )
             .child(track)
             .when_some(start_frac, |el, a| el.child(line(a, accent)))
@@ -753,10 +919,14 @@ fn section_title(label: &str, cx: &App) -> impl IntoElement {
         .child(label.to_string())
 }
 
-fn build_media(
-    clip: &Clip,
-    cx: &mut Context<Fullscreen>,
-) -> (Entity<Player>, Vec<Entity<SliderState>>, Vec<TrackState>) {
+struct Media {
+    player: Entity<Player>,
+    volumes: Vec<Entity<SliderState>>,
+    tracks: Vec<TrackState>,
+    preparing: bool,
+}
+
+fn build_media(clip: &Clip, cx: &mut Context<Fullscreen>) -> Media {
     let uri = media::path_to_uri(&clip.path).unwrap_or_default();
     let states: Vec<TrackState> = clip
         .probe
@@ -764,9 +934,14 @@ fn build_media(
         .iter()
         .map(|t| clip.state_for(t.idx))
         .collect();
-    let states_for_player = states.clone();
     let start_ms = clip.mark_start.unwrap_or(0);
     let stop_ms = clip.marks().map(|(_, end)| end);
+
+    let needs_audio = !clip.probe.tracks.is_empty();
+    let cache = media::mix::cache_path(&clip.path, clip.mtime, &states);
+    let ready = needs_audio && cache.exists();
+    let preparing = needs_audio && !ready;
+
     let player = cx.new(|cx| {
         Player::new(
             &uri,
@@ -776,8 +951,10 @@ fn build_media(
                 preview_width: None,
                 start_ms,
                 stop_ms,
+                audio_path: ready.then_some(cache),
+                resume_ms: None,
+                start_paused: preparing,
             },
-            states_for_player,
             cx,
         )
     });
@@ -796,7 +973,12 @@ fn build_media(
         })
         .collect();
 
-    (player, volumes, states)
+    Media {
+        player,
+        volumes,
+        tracks: states,
+        preparing,
+    }
 }
 
 fn fmt_time(ms: u64) -> String {

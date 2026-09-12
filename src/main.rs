@@ -50,13 +50,21 @@ fn main() {
 
         // Ensure a metadata script exists in the config dir and is used by
         // default so it's editable both in-app and on disk.
-        match config::ensure_script_file() {
+        match config::ensure_mdata_script_file() {
             Ok(path) => config::update(cx, |c| {
-                if c.library.script_path.is_none() {
-                    c.library.script_path = Some(path);
+                if c.library.mdata_script_path.is_none() {
+                    c.library.mdata_script_path = Some(path);
                 }
             }),
-            Err(e) => tracing::warn!("failed to create default script: {e:#}"),
+            Err(e) => tracing::warn!("failed to create default metadata script: {e:#}"),
+        }
+        match config::ensure_mix_script_file() {
+            Ok(path) => config::update(cx, |c| {
+                if c.library.mix_script_path.is_none() {
+                    c.library.mix_script_path = Some(path);
+                }
+            }),
+            Err(e) => tracing::warn!("failed to create default mix script: {e:#}"),
         }
 
         assets::init_themes(cx);

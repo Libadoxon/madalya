@@ -1,4 +1,5 @@
 pub mod frame;
+pub mod mix;
 pub mod player;
 pub mod probe;
 pub mod thumbnail;

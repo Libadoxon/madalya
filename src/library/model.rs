@@ -20,6 +20,9 @@ pub struct Clip {
     pub mtags: Vec<String>,
     pub meta: Vec<(String, String)>,
     pub track_state: Vec<TrackState>,
+    /// Script-derived default mix per track: replaced on every rescan, used when
+    /// the user hasn't set an explicit `track_state`.
+    pub default_tracks: Vec<TrackState>,
     pub added_at: i64,
 }
 
@@ -61,6 +64,7 @@ impl Clip {
             .iter()
             .find(|s| s.idx == idx)
             .copied()
+            .or_else(|| self.default_tracks.iter().find(|s| s.idx == idx).copied())
             .unwrap_or(TrackState::default_for(idx))
     }
 }

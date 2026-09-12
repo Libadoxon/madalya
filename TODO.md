@@ -1,0 +1,12 @@
+- [x] Make audio slider more impactful
+- [x] Add search + tag filter
+- [x] Split tag into s(cript)tags and m(anual)tags, script tags only get set by scripts (overwritten on script change), mtags get set by user manually (stay intact on script change)
+- [x] Add starting pos parameter per clip
+- [x] Add replay button
+- [ ] Add delete clip action
+- [ ] Count down time when previewing clip
+- [ ] Easy share
+- [x] Set game manually
+- [ ] Add window decorations if compositor enables them
+- [x] Add way to name clips
+- [ ] Add way to control filters like with clerk

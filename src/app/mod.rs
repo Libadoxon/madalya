@@ -29,7 +29,7 @@ pub(crate) struct PreviewState {
     pub player: Entity<Player>,
 }
 
-type LibCfgKey = (Option<PathBuf>, Option<PathBuf>, u32);
+type LibCfgKey = (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>, u32);
 
 pub struct AppView {
     pub(crate) settings_open: bool,
@@ -358,8 +358,9 @@ impl AppView {
             preview_width: Some(PREVIEW_WIDTH),
             start_ms,
             stop_ms,
+            ..Default::default()
         };
-        let player = cx.new(|cx| Player::new(&uri, opts, Vec::new(), cx));
+        let player = cx.new(|cx| Player::new(&uri, opts, cx));
         self.preview = Some(PreviewState { path, player });
         cx.notify();
     }
@@ -413,7 +414,8 @@ fn lib_cfg_key(cx: &App) -> LibCfgKey {
     let lib = &cx.global::<Config>().library;
     (
         lib.clips_dir.clone(),
-        lib.script_path.clone(),
+        lib.mdata_script_path.clone(),
+        lib.mix_script_path.clone(),
         lib.max_scan_depth,
     )
 }

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, AxisExt as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _,
-    ThemeRegistry, WindowExt as _,
+    ActiveTheme as _, AxisExt as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _,
+    Sizable as _, ThemeRegistry, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -49,11 +49,23 @@ pub fn render_settings(_app: &AppView, cx: &mut Context<AppView>) -> impl IntoEl
                         path_item(
                             "Metadata script",
                             readonly,
-                            get_script_path,
-                            set_script_path,
+                            get_mdata_script_path,
+                            set_mdata_script_path,
                             PathKind::File,
                         )
                         .description("Optional Rhai script that derives per-clip metadata and tags."),
+                    )
+                    .item(
+                        path_item(
+                            "Mix script",
+                            readonly,
+                            get_mix_script_path,
+                            set_mix_script_path,
+                            PathKind::File,
+                        )
+                        .description(
+                            "Rhai script choosing which audio tracks the default mix enables.",
+                        ),
                     )
                     .item(bool_item(
                         "Preview on hover",
@@ -89,8 +101,8 @@ pub fn render_settings(_app: &AppView, cx: &mut Context<AppView>) -> impl IntoEl
             ),
         )
         .page(
-            SettingPage::new("Script")
-                .description("Rhai metadata script, also editable on disk. Save re-runs it across the library.")
+            SettingPage::new("Scripts")
+                .description("Rhai scripts, also editable on disk. Save re-runs across the library.")
                 .group(SettingGroup::new().item(script_editor_item(app_weak.clone(), readonly))),
         )
         .page(
@@ -608,15 +620,25 @@ fn number_item(
 }
 
 struct ScriptEditorState {
-    input: Entity<InputState>,
+    metadata: Entity<InputState>,
+    mix: Entity<InputState>,
+    selected: usize,
 }
 
-fn script_file_path(cx: &App) -> PathBuf {
+fn mdata_script_file_path(cx: &App) -> PathBuf {
     cx.global::<Config>()
         .library
-        .script_path
+        .mdata_script_path
         .clone()
-        .unwrap_or_else(config::default_script_path)
+        .unwrap_or_else(config::default_mdata_script_path)
+}
+
+fn mix_script_file_path(cx: &App) -> PathBuf {
+    cx.global::<Config>()
+        .library
+        .mix_script_path
+        .clone()
+        .unwrap_or_else(config::default_mix_script_path)
 }
 
 fn script_editor_item(app: WeakEntity<AppView>, readonly: bool) -> SettingItem {
@@ -632,23 +654,58 @@ fn render_script_editor(
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement + use<> {
-    let path = script_file_path(cx);
-    let state = window.use_keyed_state(SharedString::from("script-editor"), cx, |window, cx| {
-        let contents = std::fs::read_to_string(&path).unwrap_or_default();
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor("rust")
-                .line_number(true)
-                .default_value(contents)
-        });
-        ScriptEditorState { input }
+    let meta_path = mdata_script_file_path(cx);
+    let mix_path = mix_script_file_path(cx);
+    let state = window.use_keyed_state(SharedString::from("script-editor"), cx, {
+        let meta_path = meta_path.clone();
+        let mix_path = mix_path.clone();
+        move |window, cx| {
+            let editor = |window: &mut Window, cx: &mut App, path: &PathBuf| {
+                let contents = std::fs::read_to_string(path).unwrap_or_default();
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .code_editor("rust")
+                        .line_number(true)
+                        .default_value(contents)
+                })
+            };
+            ScriptEditorState {
+                metadata: editor(window, cx, &meta_path),
+                mix: editor(window, cx, &mix_path),
+                selected: 0,
+            }
+        }
     });
-    let input = state.read(cx).input.clone();
-    let save_path = path.clone();
-    let save_input = input.clone();
 
+    let selected = state.read(cx).selected;
+    let (input, save_path, is_mix) = if selected == 1 {
+        (state.read(cx).mix.clone(), mix_path, true)
+    } else {
+        (state.read(cx).metadata.clone(), meta_path, false)
+    };
+
+    let tab = |label: &str, idx: usize| {
+        let state = state.clone();
+        let app = app.clone();
+        Button::new(SharedString::from(format!("script-tab-{idx}")))
+            .ghost()
+            .selected(selected == idx)
+            .label(label.to_string())
+            .on_click(move |_, _window, cx| {
+                state.update(cx, |s, _| s.selected = idx);
+                let _ = app.update(cx, |_, cx| cx.notify());
+            })
+    };
+
+    let save_input = input.clone();
     v_flex()
         .gap_2()
+        .child(
+            h_flex()
+                .gap_1()
+                .child(tab("Metadata", 0))
+                .child(tab("Mix", 1)),
+        )
         .child(
             div()
                 .h(px(440.))
@@ -669,7 +726,13 @@ fn render_script_editor(
                         return;
                     }
                     let p = save_path.clone();
-                    config::update(cx, |c| c.library.script_path = Some(p.clone()));
+                    config::update(cx, |c| {
+                        if is_mix {
+                            c.library.mix_script_path = Some(p);
+                        } else {
+                            c.library.mdata_script_path = Some(p);
+                        }
+                    });
                     let _ = app.update(cx, |a, cx| a.rescan_library(true, cx));
                 }),
         )
@@ -740,14 +803,26 @@ fn set_clips_dir(c: &mut Config, v: String) {
     c.library.clips_dir = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
 }
 
-fn get_script_path(c: &Config) -> String {
+fn get_mdata_script_path(c: &Config) -> String {
     c.library
-        .script_path
+        .mdata_script_path
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_default()
 }
 
-fn set_script_path(c: &mut Config, v: String) {
-    c.library.script_path = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
+fn set_mdata_script_path(c: &mut Config, v: String) {
+    c.library.mdata_script_path = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
+}
+
+fn get_mix_script_path(c: &Config) -> String {
+    c.library
+        .mix_script_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+fn set_mix_script_path(c: &mut Config, v: String) {
+    c.library.mix_script_path = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
 }

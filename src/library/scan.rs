@@ -9,10 +9,10 @@ use gpui::{App, WeakEntity};
 use walkdir::WalkDir;
 
 use super::Library;
-use super::model::Clip;
+use super::model::{Clip, TrackState};
 use super::store::Store;
 use crate::media;
-use crate::script::{ClipInput, ScriptEngine};
+use crate::script::{ClipInput, MdataScript, MixScript};
 
 const VIDEO_EXTS: &[&str] = &[
     "mp4", "mkv", "mov", "webm", "avi", "m4v", "flv", "wmv", "ts", "mpg", "mpeg",
@@ -35,7 +35,8 @@ fn concurrency() -> usize {
 pub fn run(
     library: WeakEntity<Library>,
     clips_dir: PathBuf,
-    script_path: Option<PathBuf>,
+    mdata_script_path: Option<PathBuf>,
+    mix_script_path: Option<PathBuf>,
     store: Store,
     thumb_px: u32,
     max_depth: u32,
@@ -48,7 +49,11 @@ pub fn run(
     cx.spawn(async move |cx| {
         let _ = library.update(cx, |l, cx| l.set_scanning(true, cx));
 
-        let script_hash = script_fingerprint(script_path.as_deref());
+        let script_hash = format!(
+            "{}-{}",
+            script_fingerprint(mdata_script_path.as_deref()),
+            script_fingerprint(mix_script_path.as_deref())
+        );
         let script_changed = {
             let store = store.clone();
             let hash = script_hash.clone();
@@ -96,7 +101,13 @@ pub fn run(
         let engine = {
             let store = store.clone();
             executor
-                .spawn(async move { load_engine(script_path, store) })
+                .spawn(async move { load_mdata_engine(mdata_script_path, store) })
+                .await
+        };
+        let mix_engine = {
+            let store = store.clone();
+            executor
+                .spawn(async move { load_mix_engine(mix_script_path, store) })
                 .await
         };
 
@@ -112,15 +123,23 @@ pub fn run(
             let results_tx = results_tx.clone();
             let store = store.clone();
             let engine = engine.clone();
+            let mix_engine = mix_engine.clone();
             let thumbs_dir = thumbs_dir.clone();
             executor
                 .spawn(async move {
                     while let Ok((path, fp)) = jobs_rx.recv().await {
-                        match build_clip(&path, fp, thumb_px, engine.as_deref(), &thumbs_dir)
-                            .and_then(|clip| {
-                                store.upsert_clip(&clip)?;
-                                Ok(store.load_clip(&clip.path).ok().flatten().unwrap_or(clip))
-                            }) {
+                        match build_clip(
+                            &path,
+                            fp,
+                            thumb_px,
+                            engine.as_deref(),
+                            mix_engine.as_deref(),
+                            &thumbs_dir,
+                        )
+                        .and_then(|clip| {
+                            store.upsert_clip(&clip)?;
+                            Ok(store.load_clip(&clip.path).ok().flatten().unwrap_or(clip))
+                        }) {
                             Ok(clip) => {
                                 let _ = results_tx.send(clip).await;
                             }
@@ -146,8 +165,55 @@ pub fn run(
         }
 
         let _ = library.update(cx, |l, cx| l.set_scanning(false, cx));
+
+        pregenerate_audio(&store, &executor).await;
     })
     .detach();
+}
+
+async fn pregenerate_audio(store: &Store, executor: &gpui::BackgroundExecutor) {
+    let clips = {
+        let store = store.clone();
+        executor
+            .spawn(async move { store.load_all().unwrap_or_default() })
+            .await
+    };
+
+    let (tx, rx) = smol::channel::unbounded::<(String, Vec<TrackState>, PathBuf)>();
+    for clip in clips {
+        if clip.probe.tracks.is_empty() {
+            continue;
+        }
+        let states: Vec<TrackState> = clip
+            .probe
+            .tracks
+            .iter()
+            .map(|t| clip.state_for(t.idx))
+            .collect();
+        let dest = media::mix::cache_path(&clip.path, clip.mtime, &states);
+        if dest.exists() {
+            continue;
+        }
+        if let Ok(uri) = media::path_to_uri(&clip.path) {
+            let _ = tx.send((uri, states, dest)).await;
+        }
+    }
+    tx.close();
+
+    let mut workers = Vec::new();
+    for _ in 0..concurrency() {
+        let rx = rx.clone();
+        workers.push(executor.spawn(async move {
+            while let Ok((uri, states, dest)) = rx.recv().await {
+                if let Err(e) = media::mix::render_mix(&uri, &states, &dest) {
+                    tracing::warn!("audio pre-render failed for {dest:?}: {e:#}");
+                }
+            }
+        }));
+    }
+    for w in workers {
+        w.await;
+    }
 }
 
 fn script_fingerprint(path: Option<&Path>) -> String {
@@ -164,12 +230,23 @@ fn script_fingerprint(path: Option<&Path>) -> String {
     }
 }
 
-fn load_engine(script_path: Option<PathBuf>, store: Store) -> Option<Arc<ScriptEngine>> {
+fn load_mdata_engine(script_path: Option<PathBuf>, store: Store) -> Option<Arc<MdataScript>> {
     let path = script_path?;
-    match ScriptEngine::load(&path, store) {
+    match MdataScript::load(&path, store) {
         Ok(e) => Some(Arc::new(e)),
         Err(e) => {
             tracing::error!("metadata script failed to load: {e:#}");
+            None
+        }
+    }
+}
+
+fn load_mix_engine(script_path: Option<PathBuf>, store: Store) -> Option<Arc<MixScript>> {
+    let path = script_path?;
+    match MixScript::load(&path, store) {
+        Ok(e) => Some(Arc::new(e)),
+        Err(e) => {
+            tracing::error!("mix script failed to load: {e:#}");
             None
         }
     }
@@ -179,7 +256,8 @@ fn build_clip(
     path: &Path,
     (mtime, size): (i64, u64),
     thumb_px: u32,
-    engine: Option<&ScriptEngine>,
+    engine: Option<&MdataScript>,
+    mix_engine: Option<&MixScript>,
     thumbs_dir: &Path,
 ) -> Result<Clip> {
     let uri = media::path_to_uri(path)?;
@@ -214,6 +292,8 @@ fn build_clip(
         None => (None, None, Vec::new(), Vec::new()),
     };
 
+    let default_tracks = default_tracks(&probe, mix_engine, path, mtime, size);
+
     Ok(Clip {
         path: path.to_path_buf(),
         mtime,
@@ -229,8 +309,53 @@ fn build_clip(
         mtags: Vec::new(),
         meta,
         track_state: Vec::new(),
+        default_tracks,
         added_at: now_secs(),
     })
+}
+
+fn default_tracks(
+    probe: &crate::library::model::ClipProbe,
+    mix_engine: Option<&MixScript>,
+    path: &Path,
+    mtime: i64,
+    size: u64,
+) -> Vec<TrackState> {
+    if probe.tracks.is_empty() {
+        return Vec::new();
+    }
+    let choices = mix_engine.and_then(|e| {
+        e.run(ClipInput {
+            path,
+            mtime,
+            size,
+            probe,
+        })
+        .map_err(|err| tracing::warn!("mix script error for {path:?}: {err:#}"))
+        .ok()
+    });
+    let choices = choices.unwrap_or_else(|| {
+        vec![crate::script::mix::TrackChoice {
+            idx: 0,
+            volume: 1.0,
+        }]
+    });
+    probe
+        .tracks
+        .iter()
+        .map(|t| match choices.iter().find(|c| c.idx == t.idx) {
+            Some(c) => TrackState {
+                idx: t.idx,
+                volume: c.volume,
+                muted: false,
+            },
+            None => TrackState {
+                idx: t.idx,
+                volume: 1.0,
+                muted: true,
+            },
+        })
+        .collect()
 }
 
 fn walk(dir: &Path, max_depth: u32) -> HashMap<PathBuf, (i64, u64)> {

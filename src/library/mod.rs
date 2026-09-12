@@ -62,7 +62,8 @@ impl Library {
         scan::run(
             cx.weak_entity(),
             clips_dir,
-            cfg.script_path.clone(),
+            cfg.mdata_script_path.clone(),
+            cfg.mix_script_path.clone(),
             self.store.clone(),
             cfg.thumb_px.max(1),
             cfg.max_scan_depth,

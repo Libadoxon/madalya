@@ -46,6 +46,8 @@ pub enum IconName {
     CircleDot,
     Funnel,
     RotateCcw,
+    Volume2,
+    VolumeX,
 }
 
 impl IconNamed for IconName {
@@ -54,6 +56,8 @@ impl IconNamed for IconName {
             IconName::CircleDot => "icons/circle-dot.svg",
             IconName::Funnel => "icons/funnel.svg",
             IconName::RotateCcw => "icons/rotate-ccw.svg",
+            IconName::Volume2 => "icons/volume-2.svg",
+            IconName::VolumeX => "icons/volume-x.svg",
         }
         .into()
     }

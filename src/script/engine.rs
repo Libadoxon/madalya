@@ -7,7 +7,7 @@ use super::steam;
 use crate::library::model::ClipProbe;
 use crate::library::store::Store;
 
-pub struct ScriptEngine {
+pub struct MdataScript {
     engine: Engine,
     ast: AST,
 }
@@ -26,7 +26,7 @@ pub struct ClipInput<'a> {
     pub probe: &'a ClipProbe,
 }
 
-impl ScriptEngine {
+impl MdataScript {
     pub fn load(script_path: &Path, store: Store) -> Result<Self> {
         let mut engine = Engine::new();
         engine.set_max_expr_depths(128, 64);
@@ -52,7 +52,7 @@ impl ScriptEngine {
     }
 }
 
-fn build_input_map(input: &ClipInput) -> Map {
+pub(crate) fn build_input_map(input: &ClipInput) -> Map {
     let path = input.path;
     let mut m = Map::new();
     m.insert("path".into(), path.to_string_lossy().to_string().into());
@@ -156,14 +156,14 @@ mod tests {
         Store::open(&std::env::temp_dir().join(format!("madalya-script-{n}.db"))).unwrap()
     }
 
-    fn load(src: &str) -> ScriptEngine {
+    fn load(src: &str) -> MdataScript {
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("m-{n}.rhai"));
         std::fs::write(&path, src).unwrap();
-        ScriptEngine::load(&path, tmp_store()).unwrap()
+        MdataScript::load(&path, tmp_store()).unwrap()
     }
 
     #[test]

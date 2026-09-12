@@ -93,6 +93,17 @@ impl Store {
             )?;
         }
 
+        tx.execute(
+            "DELETE FROM clip_default_tracks WHERE path = ?1",
+            params![p],
+        )?;
+        for st in &clip.default_tracks {
+            tx.execute(
+                "INSERT INTO clip_default_tracks (path, idx, volume, muted) VALUES (?1, ?2, ?3, ?4)",
+                params![p, st.idx, st.volume, st.muted as i64],
+            )?;
+        }
+
         tx.execute("DELETE FROM clip_meta WHERE path = ?1", params![p])?;
         for (ord, (k, v)) in clip.meta.iter().enumerate() {
             tx.execute(
@@ -273,6 +284,7 @@ fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
         mtags: Vec::new(),
         meta: Vec::new(),
         track_state: Vec::new(),
+        default_tracks: Vec::new(),
         added_at: r.get(13)?,
     })
 }
@@ -280,7 +292,8 @@ fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
 fn hydrate(conn: &Connection, clip: &mut Clip) -> Result<()> {
     let p = path_str(&clip.path);
     clip.probe.tracks = load_tracks(conn, &p)?;
-    clip.track_state = load_track_state(conn, &p)?;
+    clip.track_state = load_track_state(conn, &p, "track_state")?;
+    clip.default_tracks = load_track_state(conn, &p, "clip_default_tracks")?;
     clip.meta = load_meta(conn, &p)?;
     clip.stags = load_tags(conn, &p, "script")?;
     clip.mtags = load_tags(conn, &p, "user")?;
@@ -301,9 +314,10 @@ fn load_tracks(conn: &Connection, p: &str) -> Result<Vec<AudioTrack>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn load_track_state(conn: &Connection, p: &str) -> Result<Vec<TrackState>> {
-    let mut stmt =
-        conn.prepare("SELECT idx, volume, muted FROM track_state WHERE path = ?1 ORDER BY idx")?;
+fn load_track_state(conn: &Connection, p: &str, table: &str) -> Result<Vec<TrackState>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT idx, volume, muted FROM {table} WHERE path = ?1 ORDER BY idx"
+    ))?;
     Ok(stmt
         .query_map(params![p], |r| {
             Ok(TrackState {
@@ -366,6 +380,13 @@ CREATE TABLE IF NOT EXISTS clip_tracks (
     PRIMARY KEY (path, idx)
 );
 CREATE TABLE IF NOT EXISTS track_state (
+    path   TEXT NOT NULL REFERENCES clips(path) ON DELETE CASCADE,
+    idx    INTEGER NOT NULL,
+    volume REAL NOT NULL,
+    muted  INTEGER NOT NULL,
+    PRIMARY KEY (path, idx)
+);
+CREATE TABLE IF NOT EXISTS clip_default_tracks (
     path   TEXT NOT NULL REFERENCES clips(path) ON DELETE CASCADE,
     idx    INTEGER NOT NULL,
     volume REAL NOT NULL,
@@ -443,6 +464,7 @@ mod tests {
             mtags: vec![],
             meta: vec![("kind".into(), "video".into())],
             track_state: vec![],
+            default_tracks: vec![],
             added_at: 1,
         }
     }

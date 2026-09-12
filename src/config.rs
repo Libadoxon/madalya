@@ -38,7 +38,8 @@ impl Default for Appearance {
 #[serde(default)]
 pub struct Library {
     pub clips_dir: Option<PathBuf>,
-    pub script_path: Option<PathBuf>,
+    pub mdata_script_path: Option<PathBuf>,
+    pub mix_script_path: Option<PathBuf>,
     pub preview_on_hover: bool,
     pub thumb_px: u32,
     pub max_scan_depth: u32,
@@ -48,7 +49,8 @@ impl Default for Library {
     fn default() -> Self {
         Self {
             clips_dir: None,
-            script_path: None,
+            mdata_script_path: None,
+            mix_script_path: None,
             preview_on_hover: true,
             thumb_px: 320,
             max_scan_depth: 8,
@@ -85,14 +87,14 @@ pub fn is_readonly(path: &Path) -> bool {
 }
 
 /// Default metadata-script location: `$XDG_CONFIG_HOME/<APP_ID>/metadata.rhai`.
-pub fn default_script_path() -> PathBuf {
+pub fn default_mdata_script_path() -> PathBuf {
     dirs::config_dir()
         .expect("no config dir")
         .join(APP_ID)
         .join("metadata.rhai")
 }
 
-const SCRIPT_TEMPLATE: &str = r#"// Metadata script. Returns a map of fields derived from each clip.
+const MDATA_SCRIPT_TEMPLATE: &str = r#"// Metadata script. Returns a map of fields derived from each clip.
 // Available: clip.path, clip.filename, clip.stem, clip.ext, clip.dir,
 // clip.size, clip.mtime, clip.duration_ms, clip.width, clip.height,
 // clip.vcodec, clip.audio_tracks (array), clip.container_tags (map).
@@ -116,14 +118,43 @@ let m = #{};
 m
 "#;
 
-/// Create the default script file with a starter template if it doesn't exist.
-pub fn ensure_script_file() -> anyhow::Result<PathBuf> {
-    let path = default_script_path();
+/// Create the default metadata script file with a starter template if it doesn't exist.
+pub fn ensure_mdata_script_file() -> anyhow::Result<PathBuf> {
+    let path = default_mdata_script_path();
     if !path.exists() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, SCRIPT_TEMPLATE)?;
+        std::fs::write(&path, MDATA_SCRIPT_TEMPLATE)?;
+    }
+    Ok(path)
+}
+
+/// Default mix-script location: `$XDG_CONFIG_HOME/<APP_ID>/mix.rhai`.
+pub fn default_mix_script_path() -> PathBuf {
+    dirs::config_dir()
+        .expect("no config dir")
+        .join(APP_ID)
+        .join("mix.rhai")
+}
+
+const MIX_SCRIPT_TEMPLATE: &str = r#"// Mix script. Chooses which audio tracks are enabled (and at what volume) in the
+// default pre-rendered mix for each clip. Same `clip` fields as metadata.rhai;
+// clip.audio_tracks is the array of track labels.
+// Return an array of maps { track: <index>, volume: <gain> }. Listed tracks are
+// enabled at that gain (default 1.0); every other track is muted.
+
+[#{ track: 0, volume: 1.0 }]
+"#;
+
+/// Create the default mix script file if it doesn't exist.
+pub fn ensure_mix_script_file() -> anyhow::Result<PathBuf> {
+    let path = default_mix_script_path();
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, MIX_SCRIPT_TEMPLATE)?;
     }
     Ok(path)
 }

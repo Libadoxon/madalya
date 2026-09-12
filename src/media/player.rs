@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,25 +9,27 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
 use super::{frame, sample_to_bgra};
-use crate::library::model::TrackState;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct PlayerOptions {
     pub muted: bool,
     pub looping: bool,
     pub preview_width: Option<u32>,
     pub start_ms: u64,
     pub stop_ms: Option<u64>,
+    pub audio_path: Option<PathBuf>,
+    pub resume_ms: Option<u64>,
+    pub start_paused: bool,
 }
 
 enum PlayerMsg {
-    Frame(u32, u32, Vec<u8>),
+    Frame(u32, u32, Vec<u8>, Option<u64>),
     Eos,
 }
 
 pub struct Player {
     pipeline: Option<gst::Pipeline>,
-    volumes: Arc<Mutex<Vec<gst::Element>>>,
+    audio_volume: Arc<Mutex<Option<gst::Element>>>,
     latest_frame: Option<Arc<RenderImage>>,
     current_rendered_frame: Option<Arc<RenderImage>>,
     previous_rendered_frame: Option<Arc<RenderImage>>,
@@ -38,22 +40,19 @@ pub struct Player {
     duration_ms: u64,
     start_ms: u64,
     stop_ms: Option<u64>,
+    resume_ms: Option<u64>,
+    start_paused: bool,
     pending_start: bool,
     enforce_stop: bool,
     _tasks: Vec<Task<()>>,
 }
 
 impl Player {
-    pub fn new(
-        uri: &str,
-        opts: PlayerOptions,
-        states: Vec<TrackState>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let volumes = Arc::new(Mutex::new(Vec::new()));
+    pub fn new(uri: &str, opts: PlayerOptions, cx: &mut Context<Self>) -> Self {
+        let audio_volume = Arc::new(Mutex::new(None));
         let (tx, rx) = smol::channel::bounded::<PlayerMsg>(2);
 
-        let pipeline = match build_pipeline(uri, opts, states, volumes.clone(), tx) {
+        let pipeline = match build_pipeline(uri, &opts, audio_volume.clone(), tx) {
             Ok(p) => Some(p),
             Err(e) => {
                 tracing::error!("failed to build player pipeline for {uri}: {e}");
@@ -72,17 +71,11 @@ impl Player {
             tasks.push(cx.spawn(async move |this, cx| {
                 while let Ok(msg) = rx.recv().await {
                     match msg {
-                        PlayerMsg::Frame(w, h, data) => {
+                        PlayerMsg::Frame(w, h, data, pts) => {
                             let Some(image) = frame::to_render_image(w, h, data) else {
                                 continue;
                             };
-                            if this
-                                .update(cx, |p, cx| {
-                                    p.latest_frame = Some(image);
-                                    cx.notify();
-                                })
-                                .is_err()
-                            {
+                            if this.update(cx, |p, cx| p.on_frame(image, pts, cx)).is_err() {
                                 break;
                             }
                         }
@@ -114,17 +107,19 @@ impl Player {
 
         Self {
             pipeline,
-            volumes,
+            audio_volume,
             latest_frame: None,
             current_rendered_frame: None,
             previous_rendered_frame: None,
-            playing: has_pipeline,
+            playing: has_pipeline && !opts.start_paused,
             ended: false,
             looping: opts.looping,
-            position_ms: 0,
+            position_ms: opts.resume_ms.unwrap_or(opts.start_ms),
             duration_ms: 0,
             start_ms: opts.start_ms,
             stop_ms: opts.stop_ms,
+            resume_ms: opts.resume_ms,
+            start_paused: opts.start_paused,
             pending_start: has_pipeline,
             enforce_stop: opts.stop_ms.is_some(),
             _tasks: tasks,
@@ -196,16 +191,15 @@ impl Player {
         self.stop_ms = stop_ms;
     }
 
-    pub fn set_track(&self, idx: u32, volume: f64, muted: bool) {
-        if let Some(vol) = self.volumes.lock().unwrap().get(idx as usize) {
-            vol.set_property("volume", volume);
+    pub fn set_all_muted(&self, muted: bool) {
+        if let Some(vol) = self.audio_volume.lock().unwrap().as_ref() {
             vol.set_property("mute", muted);
         }
     }
 
-    pub fn set_all_muted(&self, muted: bool) {
-        for vol in self.volumes.lock().unwrap().iter() {
-            vol.set_property("mute", muted);
+    pub fn set_master_volume(&self, volume: f64) {
+        if let Some(vol) = self.audio_volume.lock().unwrap().as_ref() {
+            vol.set_property("volume", volume);
         }
     }
 
@@ -241,11 +235,31 @@ impl Player {
         }
     }
 
+    fn on_frame(&mut self, image: Arc<RenderImage>, pts: Option<u64>, cx: &mut Context<Self>) {
+        self.latest_frame = Some(image);
+        if let Some(ms) = pts {
+            self.position_ms = ms;
+            if self.enforce_stop
+                && self.playing
+                && let Some(stop) = self.stop_ms
+                && ms >= stop
+            {
+                if self.looping {
+                    self.seek_ms(self.start_ms, cx);
+                } else {
+                    self.enforce_stop = false;
+                    self.position_ms = stop;
+                    self.set_playing(false, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn refresh_position(&mut self, cx: &mut Context<Self>) {
-        let (pos, dur, prerolled) = {
+        let (dur, prerolled) = {
             let Some(p) = &self.pipeline else { return };
             (
-                p.query_position::<gst::ClockTime>().map(|t| t.mseconds()),
                 p.query_duration::<gst::ClockTime>().map(|t| t.mseconds()),
                 matches!(p.current_state(), gst::State::Paused | gst::State::Playing),
             )
@@ -255,32 +269,13 @@ impl Player {
         {
             self.duration_ms = dur;
         }
-        // Once prerolled, jump to the highlight start and begin playback.
         if self.pending_start && prerolled {
             self.pending_start = false;
-            if self.start_ms > 0 {
-                self.seek_ms(self.start_ms, cx);
+            let target = self.resume_ms.unwrap_or(self.start_ms);
+            if target > 0 {
+                self.seek_ms(target, cx);
             }
-            self.set_playing(true, cx);
-            return;
-        }
-        if let Some(pos) = pos {
-            self.position_ms = pos;
-        }
-        if self.enforce_stop
-            && self.playing
-            && let Some(stop) = self.stop_ms
-            && self.position_ms >= stop
-        {
-            if self.looping {
-                // Previews loop the marked segment.
-                self.seek_ms(self.start_ms, cx);
-            } else {
-                // Fullscreen pauses at the mark; a further play continues past it.
-                self.enforce_stop = false;
-                self.position_ms = stop;
-                self.set_playing(false, cx);
-            }
+            self.set_playing(!self.start_paused, cx);
         }
     }
 }
@@ -318,11 +313,19 @@ impl Render for Player {
     }
 }
 
+fn send_frame(tx: &smol::channel::Sender<PlayerMsg>, sample: &gst::Sample) {
+    let Some((w, h, data)) = sample_to_bgra(sample) else {
+        tracing::warn!("sample_to_bgra returned None");
+        return;
+    };
+    let pts = sample.buffer().and_then(|b| b.pts()).map(|t| t.mseconds());
+    let _ = tx.try_send(PlayerMsg::Frame(w, h, data, pts));
+}
+
 fn build_pipeline(
     uri: &str,
-    opts: PlayerOptions,
-    states: Vec<TrackState>,
-    volumes: Arc<Mutex<Vec<gst::Element>>>,
+    opts: &PlayerOptions,
+    audio_volume: Arc<Mutex<Option<gst::Element>>>,
     tx: smol::channel::Sender<PlayerMsg>,
 ) -> anyhow::Result<gst::Pipeline> {
     let pipeline = gst::Pipeline::new();
@@ -342,46 +345,53 @@ fn build_pipeline(
         .caps(&caps.build())
         .max_buffers(2)
         .drop(true)
+        .sync(true)
         .build();
 
     pipeline.add_many([&src, &videoconvert, &videoscale, appsink.upcast_ref()])?;
     gst::Element::link_many([&videoconvert, &videoscale, appsink.upcast_ref()])?;
 
-    let audiomixer = if opts.muted {
-        None
-    } else {
-        let mixer = gst::ElementFactory::make("audiomixer").build()?;
+    if let Some(path) = opts.audio_path.as_ref().filter(|_| !opts.muted) {
+        let filesrc = gst::ElementFactory::make("filesrc")
+            .property("location", path.to_string_lossy().as_ref())
+            .build()?;
+        let decode = gst::ElementFactory::make("decodebin").build()?;
+        let queue = gst::ElementFactory::make("queue").build()?;
         let conv = gst::ElementFactory::make("audioconvert").build()?;
         let resample = gst::ElementFactory::make("audioresample").build()?;
+        let vol = gst::ElementFactory::make("volume").build()?;
         let sink = gst::ElementFactory::make("autoaudiosink").build()?;
-        // Don't let the audio sink's preroll gate the pipeline: video must play
-        // even when no audio device is available.
-        sink.set_property("async-handling", true);
-        pipeline.add_many([&mixer, &conv, &resample, &sink])?;
-        gst::Element::link_many([&mixer, &conv, &resample, &sink])?;
-        Some(mixer)
-    };
+        pipeline.add_many([&filesrc, &decode, &queue, &conv, &resample, &vol, &sink])?;
+        gst::Element::link(&filesrc, &decode)?;
+        gst::Element::link_many([&queue, &conv, &resample, &vol, &sink])?;
+
+        let queue_sink = queue.static_pad("sink").expect("queue has sink pad");
+        decode.connect_pad_added(move |_, pad| {
+            let _ = pad.link(&queue_sink);
+        });
+        *audio_volume.lock().unwrap() = Some(vol);
+    }
 
     let tx_frame = tx.clone();
+    let tx_eos = tx.clone();
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                match sample_to_bgra(&sample) {
-                    Some((w, h, data)) => {
-                        let _ = tx_frame.try_send(PlayerMsg::Frame(w, h, data));
-                    }
-                    None => tracing::warn!("sample_to_bgra returned None"),
-                }
+                send_frame(&tx_frame, &sample);
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .new_preroll(move |sink| {
+                let sample = sink.pull_preroll().map_err(|_| gst::FlowError::Eos)?;
+                send_frame(&tx, &sample);
                 Ok(gst::FlowSuccess::Ok)
             })
             .eos(move |_| {
-                let _ = tx.try_send(PlayerMsg::Eos);
+                let _ = tx_eos.try_send(PlayerMsg::Eos);
             })
             .build(),
     );
 
-    let counter = AtomicUsize::new(0);
     let pipeline_weak = pipeline.downgrade();
     let vc_sink = videoconvert
         .static_pad("sink")
@@ -406,59 +416,14 @@ fn build_pipeline(
         if !name.starts_with("audio/") {
             return;
         }
-
-        match &audiomixer {
-            None => {
-                let Ok(fakesink) = gst::ElementFactory::make("fakesink")
-                    .property("sync", true)
-                    .build()
-                else {
-                    return;
-                };
-                if pipeline.add(&fakesink).is_ok() {
-                    let _ = fakesink.sync_state_with_parent();
-                    if let Some(sinkpad) = fakesink.static_pad("sink") {
-                        let _ = pad.link(&sinkpad);
-                    }
-                }
-            }
-            Some(mixer) => {
-                let idx = counter.fetch_add(1, Ordering::SeqCst);
-                let (Ok(queue), Ok(conv), Ok(resample), Ok(vol)) = (
-                    gst::ElementFactory::make("queue").build(),
-                    gst::ElementFactory::make("audioconvert").build(),
-                    gst::ElementFactory::make("audioresample").build(),
-                    gst::ElementFactory::make("volume").build(),
-                ) else {
-                    return;
-                };
-                let st = states
-                    .iter()
-                    .find(|s| s.idx as usize == idx)
-                    .copied()
-                    .unwrap_or(TrackState::default_for(idx as u32));
-                vol.set_property("volume", st.volume);
-                vol.set_property("mute", st.muted);
-
-                let chain = [&queue, &conv, &resample, &vol];
-                if pipeline.add_many(chain).is_err() || gst::Element::link_many(chain).is_err() {
-                    return;
-                }
-                for el in chain {
-                    let _ = el.sync_state_with_parent();
-                }
-                let Some(queue_sink) = queue.static_pad("sink") else {
-                    return;
-                };
-                if pad.link(&queue_sink).is_err() {
-                    return;
-                }
-                if let (Some(vol_src), Some(mixer_sink)) =
-                    (vol.static_pad("src"), mixer.request_pad_simple("sink_%u"))
-                {
-                    let _ = vol_src.link(&mixer_sink);
-                }
-                volumes.lock().unwrap().push(vol);
+        if let Ok(fakesink) = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            && pipeline.add(&fakesink).is_ok()
+        {
+            let _ = fakesink.sync_state_with_parent();
+            if let Some(sinkpad) = fakesink.static_pad("sink") {
+                let _ = pad.link(&sinkpad);
             }
         }
     });
@@ -481,17 +446,16 @@ mod tests {
         crate::media::init().unwrap();
         let uri = crate::media::path_to_uri(&clip).unwrap();
         let (tx, rx) = smol::channel::bounded::<PlayerMsg>(4);
-        let vols = Arc::new(Mutex::new(Vec::new()));
+        let audio_volume = Arc::new(Mutex::new(None));
         let pipeline = build_pipeline(
             &uri,
-            PlayerOptions {
+            &PlayerOptions {
                 muted: true,
                 looping: false,
                 preview_width: None,
                 ..Default::default()
             },
-            Vec::new(),
-            vols,
+            audio_volume,
             tx,
         )
         .unwrap();
@@ -508,7 +472,7 @@ mod tests {
         let _ = pipeline.set_state(gst::State::Null);
 
         match got {
-            Some(PlayerMsg::Frame(w, h, data)) => {
+            Some(PlayerMsg::Frame(w, h, data, _)) => {
                 assert!(w > 0 && h > 0);
                 assert_eq!(data.len(), (w * h * 4) as usize);
             }
@@ -517,7 +481,8 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_wires_all_audio_tracks() {
+    fn render_mix_produces_audio_file() {
+        use crate::library::model::TrackState;
         let clip = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
             .join("clips-test/steam_app_570 - teamfight.mkv");
         if !clip.exists() {
@@ -526,25 +491,28 @@ mod tests {
         }
         crate::media::init().unwrap();
         let uri = crate::media::path_to_uri(&clip).unwrap();
-        let (tx, _rx) = smol::channel::bounded::<PlayerMsg>(4);
-        let vols = Arc::new(Mutex::new(Vec::new()));
-        let pipeline = build_pipeline(
-            &uri,
-            PlayerOptions {
+        let states = vec![
+            TrackState {
+                idx: 0,
+                volume: 1.0,
                 muted: false,
-                looping: false,
-                preview_width: None,
-                ..Default::default()
             },
-            Vec::new(),
-            vols.clone(),
-            tx,
-        )
-        .unwrap();
-        pipeline.set_state(gst::State::Playing).unwrap();
-        smol::block_on(smol::Timer::after(Duration::from_secs(3)));
-        let n = vols.lock().unwrap().len();
-        let _ = pipeline.set_state(gst::State::Null);
-        assert_eq!(n, 3, "got {n} audio tracks wired");
+            TrackState {
+                idx: 1,
+                volume: 0.5,
+                muted: false,
+            },
+        ];
+        let dest = std::env::temp_dir().join(format!(
+            "madalya-mix-{}.flac",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::media::mix::render_mix(&uri, &states, &dest).unwrap();
+        let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_file(&dest);
+        assert!(len > 0, "mixed audio file is empty");
     }
 }
