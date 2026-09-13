@@ -1,13 +1,12 @@
 use std::path::PathBuf;
 
-use gpui::prelude::FluentBuilder as _;
-use gpui::*;
-use gpui_component::{
-    ActiveTheme as _, AxisExt as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _,
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{
+    ActiveTheme as _, AxisExt as _, Disableable as _, Icon, IndexPath, Selectable as _,
     Sizable as _, ThemeRegistry, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Editor, EditorState, Input, InputEvent, InputState},
     notification::Notification,
     popover::Popover,
     select::{SearchableVec, Select, SelectEvent, SelectState},
@@ -17,6 +16,8 @@ use gpui_component::{
     },
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
 use strum::IntoEnumIterator;
 
 use crate::app::AppView;
@@ -520,7 +521,7 @@ fn path_item(
         label,
         SettingField::element(
             move |opts: &RenderOptions, window: &mut Window, cx: &mut App| {
-                render_path_input(label, get, set, kind, readonly, opts.layout, window, cx)
+                render_path_input(label, get, set, kind, readonly, opts.layout(), window, cx)
             },
         ),
     )
@@ -620,8 +621,8 @@ fn number_item(
 }
 
 struct ScriptEditorState {
-    metadata: Entity<InputState>,
-    mix: Entity<InputState>,
+    metadata: Entity<EditorState>,
+    mix: Entity<EditorState>,
     selected: usize,
 }
 
@@ -663,8 +664,8 @@ fn render_script_editor(
             let editor = |window: &mut Window, cx: &mut App, path: &PathBuf| {
                 let contents = std::fs::read_to_string(path).unwrap_or_default();
                 cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .code_editor("rust")
+                    EditorState::new(window, cx)
+                        .language("rust")
                         .line_number(true)
                         .default_value(contents)
                 })
@@ -712,7 +713,7 @@ fn render_script_editor(
                 .border_1()
                 .border_color(cx.theme().border)
                 .rounded(cx.theme().radius)
-                .child(Input::new(&input).h_full().disabled(readonly)),
+                .child(Editor::new(&input).h_full().disabled(readonly)),
         )
         .child(
             Button::new("script-save")

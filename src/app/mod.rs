@@ -2,9 +2,10 @@ mod keybinds;
 
 use std::path::PathBuf;
 
-use gpui::prelude::FluentBuilder as _;
-use gpui::*;
-use gpui_component::{ActiveTheme as _, button::*, *};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{ActiveTheme as _, button::*, *};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
 
 use crate::config::Config;
 use crate::keybinds::{Action, KeyBind, is_cancel_gesture, is_unbind_gesture};
@@ -383,21 +384,21 @@ impl AppView {
         div()
             .w(px(460.))
             .text_base()
-            .child(gpui_component::input::Input::new(&search).large())
+            .child(gpui_kit::component::input::Input::new(&search).large())
     }
 
     fn render_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.filter.read(cx).filters().is_active();
         let filter = self.filter.clone();
         let clips = self.visible_clips_unfiltered(cx);
-        gpui_component::popover::Popover::new("filters")
+        gpui_kit::component::popover::Popover::new("filters")
             .overlay_closable(false)
             .trigger(
                 Button::new("filters")
                     .ghost()
                     .large()
                     .selected(active)
-                    .icon(crate::assets::IconName::Funnel)
+                    .icon(IconName::Funnel)
                     .tooltip("Filter"),
             )
             .content(move |_, _, cx| crate::ui::filter::panel(&filter, &clips, cx))

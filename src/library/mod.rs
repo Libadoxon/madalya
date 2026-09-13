@@ -4,7 +4,7 @@ pub mod store;
 
 use std::path::{Path, PathBuf};
 
-use gpui::{App, AppContext as _, Context, Entity};
+use gpui_kit::{App, AppContext as _, Context, Entity};
 
 use crate::config::Config;
 use crate::meta::APP_ID;

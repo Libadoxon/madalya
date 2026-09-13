@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use gpui::{App, WeakEntity};
+use gpui_kit::{App, WeakEntity};
 use walkdir::WalkDir;
 
 use super::Library;
@@ -171,7 +171,7 @@ pub fn run(
     .detach();
 }
 
-async fn pregenerate_audio(store: &Store, executor: &gpui::BackgroundExecutor) {
+async fn pregenerate_audio(store: &Store, executor: &gpui_kit::BackgroundExecutor) {
     let clips = {
         let store = store.clone();
         executor

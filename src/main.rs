@@ -1,8 +1,7 @@
-use gpui::*;
-use gpui_component::*;
+use gpui_kit::component::*;
+use gpui_kit::*;
 
 use crate::app::AppView;
-use crate::assets::Assets;
 
 mod app;
 mod assets;
@@ -16,11 +15,11 @@ mod script;
 mod ui;
 
 fn main() {
-    let app = gpui_platform::application().with_assets(Assets);
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
 
     app.run(move |cx| {
         // This must be called before using any GPUI Component features.
-        gpui_component::init(cx);
+        gpui_kit::component::init(cx);
 
         if let Err(e) = media::init() {
             tracing::error!("failed to init gstreamer: {e:#}");

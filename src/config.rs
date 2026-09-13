@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::Context as _;
-use gpui::{App, Global};
+use gpui_kit::{App, Global};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 

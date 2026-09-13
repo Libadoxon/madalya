@@ -1,67 +1,11 @@
-use std::borrow::Cow;
 use std::path::PathBuf;
 
-use gpui::*;
-use gpui_component::*;
+use gpui_kit::component::*;
+use gpui_kit::*;
 use rust_embed::RustEmbed;
 
 use crate::config::Config;
 use crate::meta::APP_ID;
-
-/// Asset source for the app. Bundles icons from `./assets` at compile time
-/// and falls back to `gpui_component_assets` for anything we don't ship.
-/// Icons come from https://lucide.dev/icons
-#[derive(RustEmbed)]
-#[folder = "./assets"]
-#[include = "icons/**/*.svg"]
-pub struct Assets;
-
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path.is_empty() {
-            return Ok(None);
-        }
-        if let Some(f) = Self::get(path) {
-            return Ok(Some(f.data));
-        }
-        gpui_component_assets::Assets.load(path)
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut out: Vec<SharedString> = Self::iter()
-            .filter_map(|p| p.starts_with(path).then(|| p.into()))
-            .collect();
-        for entry in gpui_component_assets::Assets.list(path)? {
-            if !out.contains(&entry) {
-                out.push(entry);
-            }
-        }
-        Ok(out)
-    }
-}
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub enum IconName {
-    CircleDot,
-    Funnel,
-    RotateCcw,
-    Volume2,
-    VolumeX,
-}
-
-impl IconNamed for IconName {
-    fn path(self) -> SharedString {
-        match self {
-            IconName::CircleDot => "icons/circle-dot.svg",
-            IconName::Funnel => "icons/funnel.svg",
-            IconName::RotateCcw => "icons/rotate-ccw.svg",
-            IconName::Volume2 => "icons/volume-2.svg",
-            IconName::VolumeX => "icons/volume-x.svg",
-        }
-        .into()
-    }
-}
 
 #[derive(RustEmbed)]
 #[folder = "./themes"]

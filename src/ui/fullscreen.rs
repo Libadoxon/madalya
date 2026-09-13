@@ -1,10 +1,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder as _;
-use gpui::*;
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, ElementExt as _, IconName, Sizable as _, StyledExt as _,
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, ElementExt as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
@@ -13,6 +12,8 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
 
 use crate::app::AppView;
 use crate::keybinds::Action;
@@ -555,7 +556,7 @@ impl Fullscreen {
             .child(
                 Button::new("replay")
                     .ghost()
-                    .icon(crate::assets::IconName::RotateCcw)
+                    .icon(IconName::RotateCcw)
                     .tooltip("Replay")
                     .disabled(self.preparing)
                     .on_click(cx.listener(|this, _, _w, cx| this.replay(cx))),
@@ -577,9 +578,9 @@ impl Fullscreen {
                 Button::new("mute")
                     .ghost()
                     .icon(if self.master_muted {
-                        crate::assets::IconName::VolumeX
+                        IconName::VolumeX
                     } else {
-                        crate::assets::IconName::Volume2
+                        IconName::Volume2
                     })
                     .tooltip(if self.master_muted { "Unmute" } else { "Mute" })
                     .on_click(cx.listener(|this, _, _w, cx| this.toggle_mute(cx))),

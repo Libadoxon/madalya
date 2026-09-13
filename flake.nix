@@ -50,6 +50,12 @@
           fontconfig
           libxkbcommon
           wayland
+          libxcb
+          libX11
+          libXext
+          libXcursor
+          libXi
+          libXrandr
           file
           glib
           gst_all_1.gstreamer

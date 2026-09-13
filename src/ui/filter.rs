@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
-use gpui::*;
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     calendar::Date,
@@ -10,6 +9,7 @@ use gpui_component::{
     input::InputState,
     v_flex,
 };
+use gpui_kit::*;
 
 use crate::library::model::Clip;
 
@@ -92,8 +92,8 @@ impl FilterState {
         let subs = vec![
             cx.subscribe(
                 &search,
-                |this, input, ev: &gpui_component::input::InputEvent, cx| {
-                    if matches!(ev, gpui_component::input::InputEvent::Change) {
+                |this, input, ev: &gpui_kit::component::input::InputEvent, cx| {
+                    if matches!(ev, gpui_kit::component::input::InputEvent::Change) {
                         this.filters.query = input.read(cx).value().to_string();
                         this.changed(cx);
                     }

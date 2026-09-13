@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use gpui::{
+use gpui_kit::{
     KeyDownEvent, Modifiers as GpuiModifiers, MouseButton, MouseDownEvent, NavigationDirection,
 };
 use serde::{Deserialize, Serialize};

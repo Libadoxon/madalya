@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::prelude::*;
-use gpui::{Empty, RenderImage, Task, Window, img};
+use gpui_kit::prelude::*;
+use gpui_kit::{Empty, RenderImage, Task, Window, img};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -308,7 +308,7 @@ impl Render for Player {
 
         img(latest.clone())
             .size_full()
-            .object_fit(gpui::ObjectFit::Contain)
+            .object_fit(gpui_kit::ObjectFit::Contain)
             .into_any_element()
     }
 }
