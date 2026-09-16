@@ -4131,36 +4131,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "madalya"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs 6.0.0",
- "gpui-kit",
- "gstreamer",
- "gstreamer-app",
- "gstreamer-audio",
- "gstreamer-pbutils",
- "gstreamer-video",
- "image",
- "jiff",
- "notify 8.2.0",
- "rhai",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "smallvec",
- "smol",
- "strum",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "walkdir",
-]
-
-[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5898,6 +5868,36 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ricordi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 6.0.0",
+ "gpui-kit",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-audio",
+ "gstreamer-pbutils",
+ "gstreamer-video",
+ "image",
+ "jiff",
+ "notify 8.2.0",
+ "rhai",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "smol",
+ "strum",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "walkdir",
 ]
 
 [[package]]

@@ -153,7 +153,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        Store::open(&std::env::temp_dir().join(format!("madalya-script-{n}.db"))).unwrap()
+        Store::open(&std::env::temp_dir().join(format!("ricordi-script-{n}.db"))).unwrap()
     }
 
     fn load(src: &str) -> MdataScript {

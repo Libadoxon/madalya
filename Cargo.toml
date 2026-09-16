@@ -1,5 +1,5 @@
 [package]
-name = "madalya"
+name = "ricordi"
 version = "0.1.0"
 edition = "2024"
 description = "Simple clips viewer for the people"

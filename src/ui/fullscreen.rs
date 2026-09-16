@@ -9,6 +9,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     popover::Popover,
+    scroll::Scrollbar,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -46,6 +47,8 @@ pub struct Fullscreen {
     next_mark_is_start: bool,
     timeline_bounds: Rc<Cell<Bounds<Pixels>>>,
     sync_fields: bool,
+    editing_title: bool,
+    scroll: ScrollHandle,
     _subs: Vec<Subscription>,
 }
 
@@ -94,6 +97,8 @@ impl Fullscreen {
             next_mark_is_start: true,
             timeline_bounds: Rc::new(Cell::new(Bounds::default())),
             sync_fields: true,
+            editing_title: false,
+            scroll: ScrollHandle::new(),
             _subs: Vec::new(),
         };
         this.wire(cx);
@@ -119,6 +124,8 @@ impl Fullscreen {
         self._subs.clear();
         self.clear_tag = true;
         self.sync_fields = true;
+        self.editing_title = false;
+        self.scroll = ScrollHandle::new();
         self.wire(cx);
         if self.preparing {
             self.prepare_audio(cx);
@@ -264,8 +271,9 @@ impl Fullscreen {
                         this.library
                             .update(cx, |l, cx| l.set_title(&path, title.as_deref(), cx));
                         this.clip.title = title;
-                        cx.notify();
                     }
+                    this.editing_title = false;
+                    cx.notify();
                 }
             }),
         );
@@ -446,9 +454,22 @@ impl Render for Fullscreen {
         let duration = self.duration(cx);
         let playing = self.player.read(cx).playing();
 
+        let ratio = if self.clip.probe.width > 0 && self.clip.probe.height > 0 {
+            self.clip.probe.width as f32 / self.clip.probe.height as f32
+        } else {
+            16.0 / 9.0
+        };
+        // Show the clip at its aspect ratio, but cap the height so the control
+        // row is visible below it.
+        let vp = window.viewport_size();
+        let aspect_h = f32::from(vp.width) / ratio;
+        let cap = (f32::from(vp.height) - 170.0).max(200.0);
+        let video_h = aspect_h.min(cap);
         let video = div()
-            .flex_1()
-            .min_h(px(0.))
+            .w_full()
+            .flex_shrink_0()
+            .h(px(video_h))
+            .overflow_hidden()
             .bg(rgb(0x000000))
             .relative()
             .child(self.player.clone())
@@ -478,19 +499,38 @@ impl Render for Fullscreen {
                 )
             });
 
+        let header = self.render_header(window, cx);
         let transport = self.render_transport(position, duration, playing, cx);
-        let panel = self.render_panel(cx);
+        let meta = self.render_meta(cx);
 
-        h_flex()
-            .size_full()
+        v_flex()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .child(header)
             .child(
-                v_flex()
+                div()
+                    .relative()
                     .flex_1()
-                    .min_w(px(0.))
-                    .child(video)
-                    .child(transport),
+                    .min_h(px(0.))
+                    .w_full()
+                    .child(
+                        div()
+                            .id("fs-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(v_flex().w_full().child(video).child(transport).child(meta)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .child(Scrollbar::vertical(&self.scroll)),
+                    ),
             )
-            .child(panel)
     }
 }
 
@@ -531,6 +571,7 @@ impl Fullscreen {
 
         h_flex()
             .w_full()
+            .flex_shrink_0()
             .gap_2()
             .px_3()
             .py_2()
@@ -730,7 +771,80 @@ impl Fullscreen {
             .into_any_element()
     }
 
-    fn render_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let clip = &self.clip;
+        let file_meta = format!(
+            "{}×{} · {} · {}",
+            clip.probe.width,
+            clip.probe.height,
+            fmt_time(clip.probe.duration_ms),
+            if clip.probe.vcodec.is_empty() {
+                "unknown".into()
+            } else {
+                clip.probe.vcodec.clone()
+            }
+        );
+
+        let title = if self.editing_title {
+            div()
+                .min_w(px(240.))
+                .max_w(px(560.))
+                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        // Cancel: restore the stored title so the input's Blur
+                        // commit becomes a no-op, then leave edit mode.
+                        this.sync_fields = true;
+                        this.editing_title = false;
+                        cx.notify();
+                    }
+                }))
+                .child(Input::new(&self.title_input))
+                .into_any_element()
+        } else {
+            div()
+                .id("fs-title")
+                .text_2xl()
+                .font_bold()
+                .truncate()
+                .cursor_pointer()
+                .child(clip.title())
+                .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+                    if ev.click_count() >= 2 {
+                        this.editing_title = true;
+                        let current = this.clip.title();
+                        this.title_input.update(cx, |s, cx| {
+                            s.set_value(current, window, cx);
+                            s.focus(window, cx);
+                            s.select_all(window, cx);
+                        });
+                        cx.notify();
+                    }
+                }))
+                .into_any_element()
+        };
+
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .px_4()
+            .py_3()
+            .gap_4()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(title)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(file_meta),
+            )
+            .into_any_element()
+    }
+
+    fn render_meta(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let clip = &self.clip;
 
         let mtags = h_flex().w_full().flex_wrap().gap_1().children(
@@ -802,34 +916,10 @@ impl Fullscreen {
                 .collect::<Vec<_>>(),
         );
 
-        v_flex()
-            .id("fs-panel")
-            .w(px(320.))
-            .h_full()
-            .p_3()
-            .gap_3()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .overflow_y_scroll()
-            .child(div().text_lg().font_semibold().child(clip.title()))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{}×{} · {} · {}",
-                        clip.probe.width,
-                        clip.probe.height,
-                        fmt_time(clip.probe.duration_ms),
-                        if clip.probe.vcodec.is_empty() {
-                            "unknown".into()
-                        } else {
-                            clip.probe.vcodec.clone()
-                        }
-                    )),
-            )
-            .child(section_title("Title", cx))
-            .child(Input::new(&self.title_input).small())
+        let details = v_flex()
+            .flex_1()
+            .min_w(px(0.))
+            .gap_2()
             .child(section_title("Game", cx))
             .child(Input::new(&self.game_input).small())
             .child(section_title("Highlight", cx))
@@ -862,15 +952,37 @@ impl Fullscreen {
                             .tooltip("Clear highlight")
                             .on_click(cx.listener(|this, _, _w, cx| this.clear_marks(cx))),
                     ),
-            )
+            );
+
+        let tags = v_flex()
+            .flex_1()
+            .min_w(px(0.))
+            .gap_2()
             .child(section_title("Tags", cx))
             .child(mtags)
             .child(Input::new(&self.tag_input).small())
             .when(has_stags, |el| {
                 el.child(section_title("Script tags", cx)).child(stags)
-            })
+            });
+
+        let metadata = v_flex()
+            .flex_1()
+            .min_w(px(0.))
+            .gap_1()
             .child(section_title("Metadata", cx))
-            .child(meta)
+            .child(meta);
+
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .p_4()
+            .gap_6()
+            .items_start()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(details)
+            .child(tags)
+            .child(metadata)
             .into_any_element()
     }
 }

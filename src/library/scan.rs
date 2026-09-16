@@ -411,7 +411,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("madalya-walk-{n}"));
+        let root = std::env::temp_dir().join(format!("ricordi-walk-{n}"));
         std::fs::create_dir_all(root.join("sub/deep")).unwrap();
         std::fs::write(root.join("a.mp4"), b"").unwrap();
         std::fs::write(root.join("sub/b.mp4"), b"").unwrap();

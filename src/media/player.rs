@@ -504,7 +504,7 @@ mod tests {
             },
         ];
         let dest = std::env::temp_dir().join(format!(
-            "madalya-mix-{}.flac",
+            "ricordi-mix-{}.flac",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
